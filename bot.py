@@ -4,7 +4,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 
 logging.basicConfig(level=logging.INFO)
 
-TOKEN = 'YOUR_TOKEN'
+TOKEN = '8695787171:AAEBTLKPnWrT-8MF6G7d_HgBaOnAVbZsbgs'
 
 def start(update: Update, context):
     context.bot.send_message(chat_id=update.effective_chat.id, text='Привет!')
