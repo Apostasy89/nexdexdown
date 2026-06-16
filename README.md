@@ -1,5 +1,5 @@
 # NexDownSave
-
+THIS PRE-PRE-PRE ALPHA,BETA VERSION.PLZ DONT ASK MY STARTUP
 NexDownSave is a release-ready Telegram bot for direct audio links and uploaded audio files. It is built for clean UX, predictable processing, and production deployment on Ubuntu.
 
 ## Highlights
@@ -166,4 +166,4 @@ It does not support general webpage extraction or unsupported media sources.
 
 ## License
 
-MIT
+                  3wS hlhzk
