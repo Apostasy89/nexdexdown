@@ -1,8 +1,11 @@
+from __future__ import annotations
+
+import math
 import sqlite3
-from pathlib import Path
-from datetime import datetime
-from typing import Optional, List
+from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterator
 
 
 @dataclass
@@ -12,184 +15,248 @@ class HistoryItem:
     source_type: str
     source_value: str
     title: str
+    file_size: int
     status: str
     created_at: str
-    file_size: int = 0
 
 
 class Database:
-    def __init__(self, db_path: Path):
-        self.db_path = db_path
-        self.init_db()
-    
-    def init_db(self):
-        """Инициализирует базу данных"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            cursor.execute('''
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._init_db()
+
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
+        conn = sqlite3.connect(self.path)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _init_db(self) -> None:
+        with self.connect() as conn:
+            conn.executescript(
+                """
+                PRAGMA journal_mode=WAL;
+
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
                     first_name TEXT,
                     username TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            cursor.execute('''
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS stats (
+                    key TEXT PRIMARY KEY,
+                    value INTEGER NOT NULL DEFAULT 0
+                );
+
                 CREATE TABLE IF NOT EXISTS history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL,
-                    source_type TEXT,
-                    source_value TEXT,
-                    title TEXT,
-                    status TEXT,
-                    file_size INTEGER DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (user_id) REFERENCES users(user_id)
-                )
-            ''')
-            
-            cursor.execute('''
+                    source_type TEXT NOT NULL,
+                    source_value TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    file_size INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+
                 CREATE TABLE IF NOT EXISTS favorites (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL,
-                    source_type TEXT,
-                    source_value TEXT,
-                    title TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(user_id, source_value),
-                    FOREIGN KEY (user_id) REFERENCES users(user_id)
-                )
-            ''')
-            
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS stats (
-                    key TEXT PRIMARY KEY,
-                    value INTEGER DEFAULT 0
-                )
-            ''')
-            
-            conn.commit()
-    
-    def upsert_user(self, user_id: int, first_name: str, username: Optional[str]):
-        """Добавляет или обновляет пользователя"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                'INSERT OR REPLACE INTO users (user_id, first_name, username) VALUES (?, ?, ?)',
-                (user_id, first_name, username)
+                    source_type TEXT NOT NULL,
+                    source_value TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                """
             )
-            conn.commit()
-    
+            for key in (
+                "requests",
+                "direct_downloads",
+                "uploaded_files",
+                "errors",
+                "favorites_added",
+                "search_requests",
+            ):
+                conn.execute("INSERT OR IGNORE INTO stats(key, value) VALUES(?, 0)", (key,))
+
+    def upsert_user(self, user_id: int, first_name: str | None, username: str | None) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO users(user_id, first_name, username)
+                VALUES(?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    first_name=excluded.first_name,
+                    username=excluded.username,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (user_id, first_name, username),
+            )
+
+    def increment_stat(self, key: str, amount: int = 1) -> None:
+        with self.connect() as conn:
+            conn.execute("UPDATE stats SET value = value + ? WHERE key = ?", (amount, key))
+
+    def get_stats(self) -> dict[str, int]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT key, value FROM stats").fetchall()
+            result = {row["key"]: row["value"] for row in rows}
+            result["users"] = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            result["history"] = conn.execute("SELECT COUNT(*) FROM history").fetchone()[0]
+            result["favorites"] = conn.execute("SELECT COUNT(*) FROM favorites").fetchone()[0]
+            return result
+
     def add_history(self, user_id: int, source_type: str, source_value: str, title: str, file_size: int, status: str) -> int:
-        """Добавляет запись в историю"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                'INSERT INTO history (user_id, source_type, source_value, title, file_size, status) VALUES (?, ?, ?, ?, ?, ?)',
-                (user_id, source_type, source_value, title, file_size, status)
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO history(user_id, source_type, source_value, title, file_size, status)
+                VALUES(?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, source_type, source_value, title, file_size, status),
             )
-            conn.commit()
-            return cursor.lastrowid
-    
-    def update_history_status(self, history_id: int, status: str, file_size: int = 0, title: str = ""):
-        """Обновляет статус записи в истории"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            if title:
-                cursor.execute(
-                    'UPDATE history SET status = ?, file_size = ?, title = ? WHERE id = ?',
-                    (status, file_size, title, history_id)
-                )
-            else:
-                cursor.execute(
-                    'UPDATE history SET status = ?, file_size = ? WHERE id = ?',
-                    (status, file_size, history_id)
-                )
-            conn.commit()
-    
-    def get_history(self, user_id: int, limit: int = 50) -> List[HistoryItem]:
-        """Получает историю пользователя"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                'SELECT id, user_id, source_type, source_value, title, status, created_at, file_size FROM history WHERE user_id = ? ORDER BY created_at DESC LIMIT ?',
-                (user_id, limit)
+            return int(cursor.lastrowid)
+
+    def update_history_status(self, history_id: int, status: str, file_size: int | None = None, title: str | None = None) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE history
+                SET status = ?,
+                    file_size = COALESCE(?, file_size),
+                    title = COALESCE(?, title)
+                WHERE id = ?
+                """,
+                (status, file_size, title, history_id),
             )
-            return [HistoryItem(*row) for row in cursor.fetchall()]
-    
-    def get_history_item(self, user_id: int, history_id: int) -> Optional[HistoryItem]:
-        """Получает конкретную запись истории"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                'SELECT id, user_id, source_type, source_value, title, status, created_at, file_size FROM history WHERE id = ? AND user_id = ?',
-                (history_id, user_id)
-            )
-            row = cursor.fetchone()
-            return HistoryItem(*row) if row else None
-    
+
+    def _rows_to_history(self, rows: list[sqlite3.Row]) -> list[HistoryItem]:
+        return [HistoryItem(**dict(row)) for row in rows]
+
+    def count_history(self, user_id: int) -> int:
+        with self.connect() as conn:
+            return conn.execute("SELECT COUNT(*) FROM history WHERE user_id = ?", (user_id,)).fetchone()[0]
+
+    def count_favorites(self, user_id: int) -> int:
+        with self.connect() as conn:
+            return conn.execute("SELECT COUNT(*) FROM favorites WHERE user_id = ?", (user_id,)).fetchone()[0]
+
+    def get_history_page(self, user_id: int, page: int, page_size: int) -> tuple[list[HistoryItem], int]:
+        total = self.count_history(user_id)
+        pages = max(1, math.ceil(total / page_size)) if total else 1
+        page = max(1, min(page, pages))
+        offset = (page - 1) * page_size
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, user_id, source_type, source_value, title, file_size, status, created_at
+                FROM history
+                WHERE user_id = ?
+                ORDER BY id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (user_id, page_size, offset),
+            ).fetchall()
+            return self._rows_to_history(rows), pages
+
+    def get_history(self, user_id: int, limit: int) -> list[HistoryItem]:
+        items, _ = self.get_history_page(user_id, 1, limit)
+        return items
+
+    def get_history_item(self, user_id: int, history_id: int) -> HistoryItem | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, user_id, source_type, source_value, title, file_size, status, created_at
+                FROM history
+                WHERE user_id = ? AND id = ?
+                LIMIT 1
+                """,
+                (user_id, history_id),
+            ).fetchone()
+            return HistoryItem(**dict(row)) if row else None
+
+    def search_history(self, user_id: int, query: str, limit: int) -> list[HistoryItem]:
+        pattern = f"%{query.strip()}%"
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, user_id, source_type, source_value, title, file_size, status, created_at
+                FROM history
+                WHERE user_id = ? AND (title LIKE ? OR source_value LIKE ?)
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (user_id, pattern, pattern, limit),
+            ).fetchall()
+            return self._rows_to_history(rows)
+
     def add_favorite(self, user_id: int, source_type: str, source_value: str, title: str) -> bool:
-        """Добавляет в избранное"""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    'INSERT INTO favorites (user_id, source_type, source_value, title) VALUES (?, ?, ?, ?)',
-                    (user_id, source_type, source_value, title)
-                )
-                conn.commit()
-            return True
-        except sqlite3.IntegrityError:
-            return False
-    
-    def get_favorites(self, user_id: int, limit: int = 50) -> List[dict]:
-        """Получает избранное пользователя"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                'SELECT id, source_type, source_value, title, created_at FROM favorites WHERE user_id = ? ORDER BY created_at DESC LIMIT ?',
-                (user_id, limit)
+        with self.connect() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM favorites WHERE user_id = ? AND source_value = ? LIMIT 1",
+                (user_id, source_value),
+            ).fetchone()
+            if exists is not None:
+                return False
+            conn.execute(
+                "INSERT INTO favorites(user_id, source_type, source_value, title) VALUES(?, ?, ?, ?)",
+                (user_id, source_type, source_value, title),
             )
-            return [{'id': row[0], 'source_type': row[1], 'source_value': row[2], 'title': row[3], 'created_at': row[4]} for row in cursor.fetchall()]
-    
-    def increment_stat(self, key: str):
-        """Увеличивает статистику"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute('INSERT OR IGNORE INTO stats (key, value) VALUES (?, 0)', (key,))
-            cursor.execute('UPDATE stats SET value = value + 1 WHERE key = ?', (key,))
-            conn.commit()
-    
-    def get_stats(self) -> dict:
-        """Получает статистику"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT key, value FROM stats')
-            return {row[0]: row[1] for row in cursor.fetchall()}
-    
-    def get_global_summary(self) -> dict:
-        """Получает глобальную сводку"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            cursor.execute('SELECT COUNT(*) FROM users')
-            users = cursor.fetchone()[0]
-            
-            cursor.execute('SELECT COUNT(*) FROM history')
-            history_items = cursor.fetchone()[0]
-            
-            cursor.execute('SELECT COUNT(*) FROM favorites')
-            favorites = cursor.fetchone()[0]
-            
-            cursor.execute('SELECT COUNT(*) FROM stats WHERE key = ? AND value > 0', ('errors',))
-            failed = cursor.fetchone()[0]
-            
-            return {
-                'users': users,
-                'history_items': history_items,
-                'favorites': favorites,
-                'completed': history_items - failed,
-                'failed': failed,
-            }
+            return True
+
+    def get_favorites_page(self, user_id: int, page: int, page_size: int) -> tuple[list[sqlite3.Row], int]:
+        total = self.count_favorites(user_id)
+        pages = max(1, math.ceil(total / page_size)) if total else 1
+        page = max(1, min(page, pages))
+        offset = (page - 1) * page_size
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, source_type, source_value, title, created_at
+                FROM favorites
+                WHERE user_id = ?
+                ORDER BY id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (user_id, page_size, offset),
+            ).fetchall()
+            return rows, pages
+
+    def get_favorites(self, user_id: int, limit: int) -> list[sqlite3.Row]:
+        items, _ = self.get_favorites_page(user_id, 1, limit)
+        return items
+
+    def search_favorites(self, user_id: int, query: str, limit: int) -> list[sqlite3.Row]:
+        pattern = f"%{query.strip()}%"
+        with self.connect() as conn:
+            return conn.execute(
+                """
+                SELECT id, source_type, source_value, title, created_at
+                FROM favorites
+                WHERE user_id = ? AND (title LIKE ? OR source_value LIKE ?)
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (user_id, pattern, pattern, limit),
+            ).fetchall()
+
+    def get_global_summary(self) -> sqlite3.Row:
+        with self.connect() as conn:
+            return conn.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM users) AS users,
+                    (SELECT COUNT(*) FROM history) AS history_items,
+                    (SELECT COUNT(*) FROM favorites) AS favorites,
+                    (SELECT COUNT(*) FROM history WHERE status = 'done') AS completed,
+                    (SELECT COUNT(*) FROM history WHERE status = 'failed') AS failed
+                """
+            ).fetchone()

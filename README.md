@@ -8,7 +8,6 @@
   <img src="assets/brand/github-banner.png" alt="NexDownSave GitHub banner" width="100%">
 </p>
 
-THIS PRE-PRE-PRE ALPHA,BETA VERSION.PLZ DONT ASK MY STARTUP
 NexDownSave is a release-ready Telegram bot for direct audio links and uploaded audio files. It is built for clean UX, predictable processing, and production deployment on Ubuntu.
 
 ## Highlights
@@ -88,7 +87,7 @@ Edit `.env` before first production run.
 
 ## Environment
 
-See [`.env.example`](/home/casperhood/.codex/NexDownSave/.env.example).
+See `.env.example`.
 
 Main variables:
 
@@ -136,10 +135,9 @@ Use `deploy/install.sh` for first-time VPS setup or `make service-install` for a
 ### systemd
 
 ```bash
-sudo cp deploy/nexdownsave.service /etc/systemd/system/nexdownsave.service
-sudo systemctl daemon-reload
+./deploy/install.sh
 sudo systemctl enable --now nexdownsave
-sudo systemctl status nexdownsave
+journalctl -u nexdownsave -f
 ```
 
 ### journald logs
@@ -151,19 +149,19 @@ journalctl -u nexdownsave -f
 ### healthcheck
 
 ```bash
-/home/casperhood/.codex/NexDownSave/venv/bin/python /home/casperhood/.codex/NexDownSave/healthcheck.py
+./venv/bin/python healthcheck.py
 ```
 
 ### database backup
 
 ```bash
-/home/casperhood/.codex/NexDownSave/backup_db.sh
+./backup_db.sh
 ```
 
 Optional cron example:
 
 ```bash
-0 */6 * * * /home/casperhood/.codex/NexDownSave/backup_db.sh
+0 */6 * * * /opt/nexdownsave/backup_db.sh
 ```
 
 ## Bot commands
