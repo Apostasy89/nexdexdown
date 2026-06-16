@@ -1,0 +1,8 @@
+/home/casperhood/.codex/NexDownSave/data/*.log {
+    daily
+    rotate 7
+    compress
+    missingok
+    notifempty
+    copytruncate
+}

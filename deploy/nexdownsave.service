@@ -1,0 +1,21 @@
+[Unit]
+Description=NexDownSave Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=casperhood
+WorkingDirectory=/home/casperhood/.codex/NexDownSave
+ExecStart=/home/casperhood/.codex/NexDownSave/venv/bin/python /home/casperhood/.codex/NexDownSave/bot.py
+ExecStartPre=/home/casperhood/.codex/NexDownSave/venv/bin/python /home/casperhood/.codex/NexDownSave/healthcheck.py
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nexdownsave
+
+[Install]
+WantedBy=multi-user.target

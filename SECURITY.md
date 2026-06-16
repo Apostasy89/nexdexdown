@@ -1,21 +1,14 @@
 # Security Policy
 
-## Supported Versions
+## Reporting
 
-Use this section to tell people about which versions of your project are
-currently being supported with security updates.
+Do not open public issues for secrets, tokens, or exploitable bugs.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 5.1.x   | :white_check_mark: |
-| 5.0.x   | :x:                |
-| 4.0.x   | :white_check_mark: |
-| < 4.0   | :x:                |
+Report security-sensitive issues privately to the project maintainer.
 
-## Reporting a Vulnerability
+## Basic guidance
 
-Use this section to tell people how to report a vulnerability.
-
-Tell them where to go, how often they can expect to get an update on a
-reported vulnerability, what to expect if the vulnerability is accepted or
-declined, etc.
+- rotate leaked bot tokens immediately
+- do not commit `.env`
+- restrict admin user IDs in production
+- keep backups outside public directories when possible
