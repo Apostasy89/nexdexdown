@@ -131,6 +131,17 @@ make brand-assets
 
 Use `deploy/install.sh` for first-time VPS setup or `make service-install` for an existing machine.
 
+### Docker
+
+```bash
+docker build -t nexdownsave .
+docker run --rm \
+  -e BOT_TOKEN=123456789:AA... \
+  -e ADMIN_USER_IDS=123456789 \
+  -v $(pwd)/data:/app/data \
+  nexdownsave
+```
+
 
 ### systemd
 
