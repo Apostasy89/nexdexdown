@@ -1,42 +1,49 @@
-from __future__ import annotations
-
 import re
-from pathlib import Path
-from typing import Optional
 from urllib.parse import urlparse
-
-DIRECT_AUDIO_EXTENSIONS = (".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac", ".opus")
-URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+from pathlib import Path
 
 
-
-def extract_url(text: str) -> Optional[str]:
-    match = URL_RE.search(text.strip())
-    return match.group(0) if match else None
-
-
-
-def looks_like_direct_audio_url(url: str) -> bool:
-    path = urlparse(url).path.lower()
-    return path.endswith(DIRECT_AUDIO_EXTENSIONS)
+def extract_url(text: str) -> str | None:
+    """Извлекает URL из текста"""
+    urls = re.findall(
+        r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+',
+        text
+    )
+    return urls[0] if urls else None
 
 
+def looks_like_music_url(url: str) -> bool:
+    """Проверяет, похожа ли ссылка на музыкальную платформу"""
+    music_domains = [
+        'vk.com', 'vkontakte.ru',
+        'music.yandex', 'yandex.ru/music',
+        'spotify.com',
+        'soundcloud.com',
+        'youtube.com', 'youtu.be',
+    ]
+    return any(domain in url.lower() for domain in music_domains)
 
-def human_size(size: int) -> str:
-    value = float(size)
-    for unit in ("B", "KB", "MB", "GB"):
-        if value < 1024 or unit == "GB":
-            return f"{value:.1f} {unit}"
-        value /= 1024
-    return f"{size} B"
+
+def human_size(size_bytes: int) -> str:
+    """Конвертирует размер в человекочитаемый формат"""
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size_bytes < 1024:
+            return f"{size_bytes:.2f} {unit}"
+        size_bytes /= 1024
+    return f"{size_bytes:.2f} TB"
 
 
-
-def safe_filename(name: str) -> str:
-    cleaned = re.sub(r"[^\w\-. ]+", "_", name, flags=re.UNICODE).strip()
-    return cleaned[:120] or "audio"
-
+def safe_filename(filename: str) -> str:
+    """Делает имя файла безопасным"""
+    filename = re.sub(r'[<>:"/\\|?*]', '', filename)
+    filename = re.sub(r'\s+', '_', filename)
+    return filename[:255]
 
 
 def source_title_from_url(url: str) -> str:
-    return safe_filename(Path(urlparse(url).path).stem or "audio")
+    """Извлекает название из URL"""
+    try:
+        parsed = urlparse(url)
+        return parsed.netloc or 'unknown'
+    except:
+        return 'unknown'
