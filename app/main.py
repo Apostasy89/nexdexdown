@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 
 from telegram import Update
 from telegram.constants import ChatAction, ParseMode
@@ -44,6 +45,7 @@ class BotApp:
         self.settings = settings
         self.db = Database(settings.db_path)
         self.pipeline = AudioPipeline(settings)
+        self.brand_dir = self.settings.base_dir / "assets" / "brand"
         self.user_locks: dict[int, asyncio.Lock] = {}
         self.queue: asyncio.Queue[QueueJob] = asyncio.Queue()
         self.worker_task: asyncio.Task | None = None
@@ -83,8 +85,32 @@ class BotApp:
 
     async def cmd_start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
+        message = update.message
+        if message is None:
+            return
         if user:
             self.db.upsert_user(user.id, user.first_name, user.username)
+        splash_path = self.brand_dir / "start-splash.png"
+        photo_caption = (
+            "*NexDownSave*\n"
+            "_быстрый, чистый и надежный музыкальный utility-бот_\n\n"
+            "Что внутри:\n"
+            "• очередь задач без конфликтов\n"
+            "• импорт аудиофайлов и прямых ссылок\n"
+            "• автоматическая конвертация в MP3\n"
+            "• история, избранное, поиск и диагностика\n\n"
+            f"Текущий лимит файла: *{self.settings.max_file_mb} МБ*\n\n"
+            "Отправь ссылку на аудиофайл или загрузи трек в чат."
+        )
+        if splash_path.exists():
+            with splash_path.open("rb") as image_file:
+                await message.reply_photo(
+                    photo=image_file,
+                    caption=photo_caption,
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=main_menu(),
+                )
+            return
         brand_block = r"""```
  _   _            ____                        ____                  
 | \ | | _____  __|  _ \  _____      ___ __ / ___|  __ ___   _____ 
@@ -106,7 +132,7 @@ class BotApp:
             f"Текущий лимит файла: *{self.settings.max_file_mb} МБ*\n\n"
             "Отправь ссылку на аудиофайл или загрузи трек в чат."
         )
-        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=main_menu())
+        await message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=main_menu())
 
     async def cmd_help(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         help_text = r"""*Как работает NexDownSave*

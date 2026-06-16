@@ -1,4 +1,13 @@
 # NexDownSave
+
+<p align="center">
+  <img src="assets/brand/nexdownsave-logo.png" alt="NexDownSave logo" width="320">
+</p>
+
+<p align="center">
+  <img src="assets/brand/github-banner.png" alt="NexDownSave GitHub banner" width="100%">
+</p>
+
 THIS PRE-PRE-PRE ALPHA,BETA VERSION.PLZ DONT ASK MY STARTUP
 NexDownSave is a release-ready Telegram bot for direct audio links and uploaded audio files. It is built for clean UX, predictable processing, and production deployment on Ubuntu.
 
@@ -14,6 +23,7 @@ NexDownSave is a release-ready Telegram bot for direct audio links and uploaded 
 - SQLite persistence for users, stats, history, and favorites
 - `.env` support without extra runtime dependencies
 - Rotating logs, healthcheck, database backup, and `systemd` service support
+- local brand asset generation for logo, banner, avatar, splash, and promo card
 
 ## Brand direction
 
@@ -35,6 +45,22 @@ NexDownSave positions itself as a fast and clean music utility bot:
 - `healthcheck.py` - runtime health probe
 - `backup_db.sh` - SQLite backup utility
 - `deploy/nexdownsave.service` - `systemd` service file
+- `scripts/generate_brand_assets.py` - local PNG brand asset generator
+- `assets/brand/` - generated logo and cover graphics
+
+## Brand assets
+
+<p align="center">
+  <img src="assets/brand/promo-card.png" alt="NexDownSave promo card" width="420">
+</p>
+
+- Logo: `assets/brand/nexdownsave-logo.png`
+- GitHub banner: `assets/brand/github-banner.png`
+- Telegram avatar: `assets/brand/telegram-avatar.png`
+- Start splash: `assets/brand/start-splash.png`
+- Promo card: `assets/brand/promo-card.png`
+- Social square: `assets/brand/social-square.png`
+- Social wide: `assets/brand/social-wide.png`
 
 ## Requirements
 
@@ -88,6 +114,7 @@ make env
 make run
 make health
 make backup
+make brand-assets
 ```
 
 ### run.sh
@@ -98,6 +125,7 @@ make backup
 ./run.sh run
 ./run.sh health
 ./run.sh backup
+./run.sh brand-assets
 ```
 
 ## Production deployment

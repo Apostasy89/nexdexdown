@@ -16,6 +16,7 @@ Usage:
   ./run.sh compile          Syntax check project
   ./run.sh health           Run healthcheck
   ./run.sh backup           Create database backup
+  ./run.sh brand-assets     Generate local brand PNG assets
   ./run.sh service-install  Install/update systemd service
   ./run.sh service-restart  Restart systemd service
   ./run.sh service-status   Show systemd service status
@@ -67,6 +68,12 @@ cmd_backup() {
   ./backup_db.sh
 }
 
+cmd_brand_assets() {
+  ensure_venv
+  cd "$PROJECT_DIR"
+  "$PYTHON" scripts/generate_brand_assets.py
+}
+
 cmd_service_install() {
   sudo cp "$PROJECT_DIR/deploy/nexdownsave.service" "/etc/systemd/system/$SERVICE.service"
   sudo systemctl daemon-reload
@@ -96,6 +103,7 @@ case "${1:-help}" in
   compile) cmd_compile ;;
   health) cmd_health ;;
   backup) cmd_backup ;;
+  brand-assets) cmd_brand_assets ;;
   service-install) cmd_service_install ;;
   service-restart) cmd_service_restart ;;
   service-status) cmd_service_status ;;

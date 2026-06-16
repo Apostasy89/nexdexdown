@@ -5,7 +5,7 @@ PYTHON := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
 SERVICE := nexdownsave
 
-.PHONY: help venv install env run compile health backup service-install service-restart service-status logs clean
+.PHONY: help venv install env run compile health backup brand-assets service-install service-restart service-status logs clean
 
 help:
 	@echo "NexDownSave commands:"
@@ -16,6 +16,7 @@ help:
 	@echo "  make compile          - syntax check project"
 	@echo "  make health           - run healthcheck"
 	@echo "  make backup           - create SQLite backup"
+	@echo "  make brand-assets     - generate local brand PNG assets"
 	@echo "  make service-install  - install/update systemd service"
 	@echo "  make service-restart  - restart systemd service"
 	@echo "  make service-status   - show systemd status"
@@ -43,6 +44,9 @@ health:
 
 backup:
 	cd $(PROJECT_DIR) && ./backup_db.sh
+
+brand-assets:
+	cd $(PROJECT_DIR) && $(PYTHON) scripts/generate_brand_assets.py
 
 service-install:
 	sudo cp $(PROJECT_DIR)/deploy/nexdownsave.service /etc/systemd/system/$(SERVICE).service
