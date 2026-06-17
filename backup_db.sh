@@ -14,6 +14,10 @@ if [[ ! -f "$DB_PATH" ]]; then
 fi
 
 sqlite3 "$DB_PATH" ".backup '$BACKUP_DIR/music_bot-$TIMESTAMP.sqlite3'"
-find "$BACKUP_DIR" -type f -name 'music_bot-*.sqlite3' | sort | head -n -10 | xargs -r rm -f
+
+mapfile -t backups < <(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'music_bot-*.sqlite3' | sort)
+if (( ${#backups[@]} > 10 )); then
+  printf '%s\0' "${backups[@]:0:${#backups[@]}-10}" | xargs -0r rm -f
+fi
 
 echo "backup created: $BACKUP_DIR/music_bot-$TIMESTAMP.sqlite3"

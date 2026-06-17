@@ -5,15 +5,16 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=__RUN_USER__
-Group=__RUN_USER__
-WorkingDirectory=__PROJECT_DIR__
-ExecStart=__PROJECT_DIR__/venv/bin/python __PROJECT_DIR__/bot.py
-ExecStartPre=__PROJECT_DIR__/venv/bin/python __PROJECT_DIR__/healthcheck.py
+User=casperhood
+WorkingDirectory=/home/casperhood/.codex/NexDownSave
+ExecStartPre=/home/casperhood/.codex/NexDownSave/venv/bin/python /home/casperhood/.codex/NexDownSave/healthcheck.py --allow-missing-db
+ExecStart=/home/casperhood/.codex/NexDownSave/venv/bin/python /home/casperhood/.codex/NexDownSave/bot.py
 Restart=always
 RestartSec=3
 TimeoutStopSec=20
 Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=yes
+PrivateTmp=yes
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=nexdownsave

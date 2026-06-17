@@ -8,58 +8,37 @@
   <img src="assets/brand/github-banner.png" alt="NexDownSave GitHub banner" width="100%">
 </p>
 
-NexDownSave is a release-ready Telegram bot for direct audio links and uploaded audio files. It is built for clean UX, predictable processing, and production deployment on Ubuntu.
+NexDownSave is a production-oriented Telegram bot for direct audio links and uploaded audio files. It focuses on predictable processing, clean Russian-first UX, and maintainable deployment on Ubuntu.
 
 ## Highlights
 
 - Russian-first branded Telegram UX
+- safe HTML-formatted bot responses without Markdown escaping bugs
 - paginated history and favorites
 - in-bot library search
-- Queue-based job processing with retry attempts
+- queue-based job processing with backpressure via `QUEUE_MAXSIZE`
 - MP3 conversion via `ffmpeg`
-- Metadata-rich result cards via `ffprobe`
+- metadata-rich result cards via `ffprobe`
 - stronger uploaded-file validation before conversion
 - SQLite persistence for users, stats, history, and favorites
-- `.env` support without extra runtime dependencies
-- Rotating logs, healthcheck, database backup, and `systemd` service support
+- rotating logs, healthcheck, database backup, and `systemd` service support
+- local unit tests and GitHub Actions CI
 - local brand asset generation for logo, banner, avatar, splash, and promo card
-
-## Brand direction
-
-NexDownSave positions itself as a fast and clean music utility bot:
-
-- direct audio file intake
-- minimal friction in chat
-- stable queue processing
-- operational visibility for admins
 
 ## Repository layout
 
 - `bot.py` - entry point
 - `app/config.py` - settings and `.env` loading
-- `app/main.py` - Telegram handlers, queue, UX, orchestration
-- `app/services.py` - downloading, conversion, metadata extraction
+- `app/main.py` - Telegram handlers, queue, UX, and orchestration
+- `app/services.py` - downloading, conversion, and metadata extraction
 - `app/db.py` - SQLite persistence
 - `app/keyboards.py` - inline keyboards
 - `healthcheck.py` - runtime health probe
 - `backup_db.sh` - SQLite backup utility
 - `deploy/nexdownsave.service` - `systemd` service file
-- `scripts/generate_brand_assets.py` - local PNG brand asset generator
-- `assets/brand/` - generated logo and cover graphics
-
-## Brand assets
-
-<p align="center">
-  <img src="assets/brand/promo-card.png" alt="NexDownSave promo card" width="420">
-</p>
-
-- Logo: `assets/brand/nexdownsave-logo.png`
-- GitHub banner: `assets/brand/github-banner.png`
-- Telegram avatar: `assets/brand/telegram-avatar.png`
-- Start splash: `assets/brand/start-splash.png`
-- Promo card: `assets/brand/promo-card.png`
-- Social square: `assets/brand/social-square.png`
-- Social wide: `assets/brand/social-wide.png`
+- `deploy/install.sh` - first-time VPS setup helper
+- `tests/` - unit tests for critical logic
+- `.github/workflows/ci.yml` - basic CI pipeline
 
 ## Requirements
 
@@ -87,7 +66,7 @@ Edit `.env` before first production run.
 
 ## Environment
 
-See `.env.example`.
+See [`.env.example`](/home/casperhood/.codex/NexDownSave/.env.example).
 
 Main variables:
 
@@ -99,6 +78,7 @@ Main variables:
 - `HISTORY_LIMIT`
 - `RETRY_ATTEMPTS`
 - `QUEUE_POLL_INTERVAL`
+- `QUEUE_MAXSIZE`
 
 ## Local management
 
@@ -110,6 +90,8 @@ Use either `make` or `run.sh`.
 make help
 make install
 make env
+make test
+make check
 make run
 make health
 make backup
@@ -121,34 +103,71 @@ make brand-assets
 ```bash
 ./run.sh setup
 ./run.sh env
+./run.sh test
+./run.sh check
 ./run.sh run
 ./run.sh health
 ./run.sh backup
 ./run.sh brand-assets
 ```
 
+## Testing
+
+```bash
+cd /home/casperhood/.codex/NexDownSave
+python3 -m unittest discover -s tests -p 'test_*.py'
+python3 -m compileall .
+```
+
+
+
+## Bothost deployment
+
+Bothost builds bots inside Docker containers and supports custom `Dockerfile`. This repository includes a ready-to-use container build for Bothost with `ffmpeg`, `curl`, `sqlite3`, and persistent data in `/app/data`.
+
+### What to configure in Bothost
+
+1. Create a bot from GitHub repository URL: `https://github.com/Apostasy89/nexdexdown.git`
+2. Branch: `main`
+3. Build mode: custom `Dockerfile`
+4. Add environment variables in the Bothost dashboard:
+   - `BOT_TOKEN`
+   - `ADMIN_USER_IDS`
+   - optional: `MAX_FILE_MB`, `DOWNLOAD_TIMEOUT`, `FFMPEG_TIMEOUT`, `QUEUE_MAXSIZE`
+5. Keep database and logs in the default container paths:
+   - `DB_PATH=/app/data/music_bot.sqlite3`
+   - `LOG_PATH=/app/data/bot.log`
+
+### Why this works on Bothost
+
+- Bothost installs Python dependencies from the repo root and supports custom `Dockerfile` for system packages.
+- The bot needs `ffmpeg`, so plain `requirements.txt` alone is not enough.
+- The application stores runtime files in `data/`, which maps cleanly to Bothost persistent storage guidance.
+
+### Recommended Bothost environment variables
+
+```text
+BOT_TOKEN=123456789:AA...
+ADMIN_USER_IDS=123456789
+DB_PATH=/app/data/music_bot.sqlite3
+LOG_PATH=/app/data/bot.log
+QUEUE_MAXSIZE=100
+MAX_FILE_MB=50
+DOWNLOAD_TIMEOUT=180
+FFMPEG_TIMEOUT=300
+```
+
 ## Production deployment
 
 Use `deploy/install.sh` for first-time VPS setup or `make service-install` for an existing machine.
 
-### Docker
-
-```bash
-docker build -t nexdownsave .
-docker run --rm \
-  -e BOT_TOKEN=123456789:AA... \
-  -e ADMIN_USER_IDS=123456789 \
-  -v $(pwd)/data:/app/data \
-  nexdownsave
-```
-
-
 ### systemd
 
 ```bash
-./deploy/install.sh
+sudo cp deploy/nexdownsave.service /etc/systemd/system/nexdownsave.service
+sudo systemctl daemon-reload
 sudo systemctl enable --now nexdownsave
-journalctl -u nexdownsave -f
+sudo systemctl status nexdownsave
 ```
 
 ### journald logs
@@ -160,19 +179,25 @@ journalctl -u nexdownsave -f
 ### healthcheck
 
 ```bash
-./venv/bin/python healthcheck.py
+/home/casperhood/.codex/NexDownSave/venv/bin/python /home/casperhood/.codex/NexDownSave/healthcheck.py
+```
+
+For first deployment before the database exists:
+
+```bash
+/home/casperhood/.codex/NexDownSave/venv/bin/python /home/casperhood/.codex/NexDownSave/healthcheck.py --allow-missing-db
 ```
 
 ### database backup
 
 ```bash
-./backup_db.sh
+/home/casperhood/.codex/NexDownSave/backup_db.sh
 ```
 
 Optional cron example:
 
 ```bash
-0 */6 * * * /opt/nexdownsave/backup_db.sh
+0 */6 * * * /home/casperhood/.codex/NexDownSave/backup_db.sh
 ```
 
 ## Bot commands
@@ -200,7 +225,8 @@ It does not support general webpage extraction or unsupported media sources.
 - use a fresh Telegram bot token
 - do not commit `.env`
 - keep `data/` out of public repos unless sanitized
+- keep `QUEUE_MAXSIZE` realistic to avoid disk pressure during bursts
 
 ## License
 
-                  3wS hlhzk
+MIT

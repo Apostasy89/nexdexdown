@@ -3,10 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 
-from telegram import Update
+from telegram import Bot, Message, Update
 from telegram.constants import ChatAction, ParseMode
+from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -21,7 +21,17 @@ from .db import Database
 from .keyboards import main_menu, pager, result_actions
 from .logging_setup import setup_logging
 from .services import AudioMetadata, AudioPipeline, ProcessResult
-from .utils import extract_url, human_size, looks_like_direct_audio_url, safe_filename, source_title_from_url
+from .utils import (
+    extract_url,
+    html_code,
+    html_escape,
+    human_duration,
+    human_size,
+    looks_like_direct_audio_url,
+    present_status,
+    safe_filename,
+    source_title_from_url,
+)
 
 logger = logging.getLogger(__name__)
 PAGE_SIZE = 5
@@ -45,9 +55,9 @@ class BotApp:
         self.settings = settings
         self.db = Database(settings.db_path)
         self.pipeline = AudioPipeline(settings)
-        self.brand_dir = self.settings.base_dir / "assets" / "brand"
+        self.brand_dir = self.settings.base_dir / 'assets' / 'brand'
         self.user_locks: dict[int, asyncio.Lock] = {}
-        self.queue: asyncio.Queue[QueueJob] = asyncio.Queue()
+        self.queue: asyncio.Queue[QueueJob] = asyncio.Queue(maxsize=settings.queue_maxsize)
         self.worker_task: asyncio.Task | None = None
 
     def get_lock(self, user_id: int) -> asyncio.Lock:
@@ -77,429 +87,527 @@ class BotApp:
             try:
                 await self.process_job(app, job)
             except Exception:
-                logger.exception("Queue job failed")
-                self.db.increment_stat("errors")
+                logger.exception('Queue job failed outside guarded flow')
+                self.db.increment_stat('errors')
+                self.db.update_history_status(job.history_id, 'failed')
             finally:
                 self.queue.task_done()
                 await asyncio.sleep(self.settings.queue_poll_interval)
 
+    async def safe_edit_status_message(self, bot: Bot, job: QueueJob, text: str) -> None:
+        if job.status_message_id is None:
+            return
+        try:
+            await bot.edit_message_text(
+                chat_id=job.chat_id,
+                message_id=job.status_message_id,
+                text=text,
+            )
+        except BadRequest as exc:
+            message = str(exc).lower()
+            if 'message is not modified' in message or 'message to edit not found' in message:
+                return
+            logger.warning('Could not edit status message for history_id=%s: %s', job.history_id, exc)
+        except (Forbidden, TelegramError) as exc:
+            logger.warning('Could not edit status message for history_id=%s: %s', job.history_id, exc)
+
+    async def safe_delete_status_message(self, bot: Bot, job: QueueJob) -> None:
+        if job.status_message_id is None:
+            return
+        try:
+            await bot.delete_message(chat_id=job.chat_id, message_id=job.status_message_id)
+        except BadRequest as exc:
+            if 'message to delete not found' in str(exc).lower():
+                return
+            logger.warning('Could not delete status message for history_id=%s: %s', job.history_id, exc)
+        except (Forbidden, TelegramError) as exc:
+            logger.warning('Could not delete status message for history_id=%s: %s', job.history_id, exc)
+
+    async def fail_job(self, bot: Bot, job: QueueJob, message: str) -> None:
+        self.db.increment_stat('errors')
+        self.db.update_history_status(job.history_id, 'failed')
+        await self.safe_edit_status_message(bot, job, message)
+
+    async def reply_queue_busy(self, message: Message) -> None:
+        await message.reply_text(
+            '◌ Очередь NexDownSave временно перегружена.\n'
+            f'└ Лимит задач: {self.settings.queue_maxsize}. Попробуй позже.',
+            reply_markup=main_menu(),
+        )
+
+    async def enqueue_job(self, message: Message, job: QueueJob, accepted_text: str) -> None:
+        status_message = await message.reply_text(f'{accepted_text}\n└ Позиция: {self.queue.qsize() + 1}')
+        job.status_message_id = status_message.message_id
+        try:
+            self.queue.put_nowait(job)
+        except asyncio.QueueFull:
+            self.db.increment_stat('errors')
+            self.db.update_history_status(job.history_id, 'failed')
+            await status_message.edit_text(
+                '◌ Очередь NexDownSave временно перегружена.\n'
+                f'└ Лимит задач: {self.settings.queue_maxsize}. Попробуй позже.'
+            )
+
     async def cmd_start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        del ctx
         user = update.effective_user
         message = update.message
         if message is None:
             return
         if user:
             self.db.upsert_user(user.id, user.first_name, user.username)
-        splash_path = self.brand_dir / "start-splash.png"
-        photo_caption = (
-            "*NexDownSave*\n"
-            "_быстрый, чистый и надежный музыкальный utility-бот_\n\n"
-            "Что внутри:\n"
-            "• очередь задач без конфликтов\n"
-            "• импорт аудиофайлов и прямых ссылок\n"
-            "• автоматическая конвертация в MP3\n"
-            "• история, избранное, поиск и диагностика\n\n"
-            f"Текущий лимит файла: *{self.settings.max_file_mb} МБ*\n\n"
-            "Отправь ссылку на аудиофайл или загрузи трек в чат."
+        splash_path = self.brand_dir / 'start-splash.png'
+        caption = (
+            '<b>NexDownSave</b>\n'
+            '<i>быстрый, чистый и надежный музыкальный utility-бот</i>\n\n'
+            'Что внутри:\n'
+            '• очередь задач без конфликтов\n'
+            '• импорт аудиофайлов и прямых ссылок\n'
+            '• автоматическая конвертация в MP3\n'
+            '• история, избранное, поиск и диагностика\n\n'
+            f'Текущий лимит файла: <b>{self.settings.max_file_mb} МБ</b>\n\n'
+            'Отправь ссылку на аудиофайл или загрузи трек в чат.'
         )
         if splash_path.exists():
-            with splash_path.open("rb") as image_file:
+            with splash_path.open('rb') as image_file:
                 await message.reply_photo(
                     photo=image_file,
-                    caption=photo_caption,
-                    parse_mode=ParseMode.MARKDOWN,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
                     reply_markup=main_menu(),
                 )
             return
-        brand_block = r"""```
- _   _            ____                        ____                  
-| \ | | _____  __|  _ \  _____      ___ __ / ___|  __ ___   _____ 
-|  \| |/ _ \ \/ /| | | |/ _ \ \ /\ / / '_ \\___ \ / _` \ \ / / _ \
-| |\  |  __/>  < | |_| | (_) \ V  V /| | | |___) | (_| |\ V /  __/
-|_| \_|\___/_/\_\|____/ \___/ \_/\_/ |_| |_|____/ \__,_| \_/ \___|
-```
-"""
-        text = (
-            brand_block
-            + "*NexDownSave*\n"
-            "_быстрый, чистый и надежный музыкальный utility-бот_\n\n"
-            "Что внутри:\n"
-            "• очередь задач без конфликтов\n"
-            "• прямые аудиоссылки и загрузки файлов\n"
-            "• импорт и глубокая проверка пользовательских аудиофайлов\n"
-            "• автоматическая конвертация в MP3 и чтение метаданных\n"
-            "• история, избранное, поиск и админ-диагностика\n\n"
-            f"Текущий лимит файла: *{self.settings.max_file_mb} МБ*\n\n"
-            "Отправь ссылку на аудиофайл или загрузи трек в чат."
-        )
-        await message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=main_menu())
+        await message.reply_text(caption, parse_mode=ParseMode.HTML, reply_markup=main_menu())
 
     async def cmd_help(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        help_text = r"""*Как работает NexDownSave*
-
-1\. Пришли прямую ссылку на аудиофайл: `.mp3`, `.m4a`, `.wav`, `.ogg`, `.flac`, `.aac`, `.opus`
-2\. Или загрузи свой аудиофайл/документ прямо в чат
-3\. Бот поставит задачу в очередь, проверит размер, аудиопоток и метаданные, затем конвертирует в MP3 и пришлет результат
-
-Дополнительно:
-• `/history` показывает историю с пагинацией
-• `/favorites` показывает избранное с пагинацией
-• `/search текст` ищет по истории и избранному"""
-        await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN_V2)
+        del ctx
+        if update.message is None:
+            return
+        help_text = (
+            '<b>Как работает NexDownSave</b>\n\n'
+            '1. Пришли прямую ссылку на аудиофайл: '
+            '<code>.mp3</code>, <code>.m4a</code>, <code>.wav</code>, <code>.ogg</code>, '
+            '<code>.flac</code>, <code>.aac</code>, <code>.opus</code>, <code>.wma</code>, <code>.aiff</code>\n'
+            '2. Или загрузи свой аудиофайл или документ прямо в чат\n'
+            '3. Бот поставит задачу в очередь, проверит размер, аудиопоток и метаданные, затем конвертирует в MP3\n\n'
+            'Дополнительно:\n'
+            '• <code>/history</code> показывает историю с пагинацией\n'
+            '• <code>/favorites</code> показывает избранное\n'
+            '• <code>/search текст</code> ищет по истории и избранному\n'
+            '• <code>/status</code> показывает лимиты и загрузку очереди'
+        )
+        await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
 
     async def cmd_stats(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.message.reply_text(self.render_stats(), parse_mode=ParseMode.MARKDOWN)
+        del ctx
+        if update.message is None:
+            return
+        await update.message.reply_text(self.render_stats(), parse_mode=ParseMode.HTML)
 
     async def cmd_history(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        del ctx
         user = update.effective_user
-        if user is None:
+        if user is None or update.message is None:
             return
         text, markup = self.render_history_page(user.id, 1)
-        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=markup)
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
     async def cmd_favorites(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        del ctx
         user = update.effective_user
-        if user is None:
+        if user is None or update.message is None:
             return
         text, markup = self.render_favorites_page(user.id, 1)
-        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=markup)
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
     async def cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.message.reply_text(self.render_status(), parse_mode=ParseMode.MARKDOWN)
+        del ctx
+        if update.message is None:
+            return
+        await update.message.reply_text(self.render_status(), parse_mode=ParseMode.HTML)
 
     async def cmd_search(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
         if user is None or update.message is None:
             return
-        query = " ".join(ctx.args).strip()
+        query = ' '.join(ctx.args).strip()
         if not query:
-            await update.message.reply_text("Используй `/search название` для поиска по истории и избранному.", parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(
+                'Используй <code>/search название</code> для поиска по истории и избранному.',
+                parse_mode=ParseMode.HTML,
+            )
             return
-        self.db.increment_stat("search_requests")
-        await update.message.reply_text(self.render_search(user.id, query), parse_mode=ParseMode.MARKDOWN)
+        self.db.increment_stat('search_requests')
+        await update.message.reply_text(self.render_search(user.id, query), parse_mode=ParseMode.HTML)
 
     async def cmd_admin(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        del ctx
         user = update.effective_user
-        if user is None or not self.is_admin(user.id):
-            await update.message.reply_text("Требуется доступ администратора.")
+        if update.message is None or user is None:
+            return
+        if not self.is_admin(user.id):
+            await update.message.reply_text('Требуется доступ администратора.')
             return
         summary = self.db.get_global_summary()
         await update.message.reply_text(
-            "*NexDownSave Admin*\n\n"
-            f"Пользователей: *{summary['users']}*\n"
-            f"Записей истории: *{summary['history_items']}*\n"
-            f"Избранного: *{summary['favorites']}*\n"
-            f"Успешных задач: *{summary['completed']}*\n"
-            f"Неудачных задач: *{summary['failed']}*\n"
-            f"Размер очереди: *{self.queue.qsize()}*",
-            parse_mode=ParseMode.MARKDOWN,
+            '<b>NexDownSave Admin</b>\n\n'
+            f"Пользователей: <b>{summary['users']}</b>\n"
+            f"Записей истории: <b>{summary['history_items']}</b>\n"
+            f"Избранного: <b>{summary['favorites']}</b>\n"
+            f"Успешных задач: <b>{summary['completed']}</b>\n"
+            f"Неудачных задач: <b>{summary['failed']}</b>\n"
+            f"Размер очереди: <b>{self.queue.qsize()}</b>",
+            parse_mode=ParseMode.HTML,
         )
 
     def render_stats(self) -> str:
         stats = self.db.get_stats()
         return (
-            "*Статистика NexDownSave*\n\n"
-            f"Запросов: *{stats.get('requests', 0)}*\n"
-            f"Прямых загрузок: *{stats.get('direct_downloads', 0)}*\n"
-            f"Загруженных файлов: *{stats.get('uploaded_files', 0)}*\n"
-            f"Добавлений в избранное: *{stats.get('favorites_added', 0)}*\n"
-            f"Поисковых запросов: *{stats.get('search_requests', 0)}*\n"
-            f"Ошибок: *{stats.get('errors', 0)}*\n"
-            f"Пользователей: *{stats.get('users', 0)}*\n"
-            f"Записей истории: *{stats.get('history', 0)}*"
+            '<b>Статистика NexDownSave</b>\n\n'
+            f"Запросов: <b>{stats.get('requests', 0)}</b>\n"
+            f"Прямых загрузок: <b>{stats.get('direct_downloads', 0)}</b>\n"
+            f"Загруженных файлов: <b>{stats.get('uploaded_files', 0)}</b>\n"
+            f"Добавлений в избранное: <b>{stats.get('favorites_added', 0)}</b>\n"
+            f"Поисковых запросов: <b>{stats.get('search_requests', 0)}</b>\n"
+            f"Ошибок: <b>{stats.get('errors', 0)}</b>\n"
+            f"Пользователей: <b>{stats.get('users', 0)}</b>\n"
+            f"Записей истории: <b>{stats.get('history', 0)}</b>\n"
+            f"Элементов в избранном: <b>{stats.get('favorites', 0)}</b>"
         )
 
     def render_history_page(self, user_id: int, page: int) -> tuple[str, object]:
         items, pages = self.db.get_history_page(user_id, page, PAGE_SIZE)
         if not items:
-            return "История NexDownSave пока пуста.", main_menu()
-        lines = ["*Последние задачи*"]
+            return 'История NexDownSave пока пуста.', main_menu()
+        lines = ['<b>Последние задачи</b>']
         for item in items:
-            lines.append(f"• `{item.title}` | `{item.status}` | {item.created_at}")
-        return "\n".join(lines), pager("history", page, pages)
+            lines.append(
+                f"• {html_code(item.title)} | <code>{html_escape(present_status(item.status))}</code> | {html_escape(item.created_at)}"
+            )
+        return '\n'.join(lines), pager('history', page, pages)
 
     def render_favorites_page(self, user_id: int, page: int) -> tuple[str, object]:
         items, pages = self.db.get_favorites_page(user_id, page, PAGE_SIZE)
         if not items:
-            return "В избранном пока ничего нет.", main_menu()
-        lines = ["*Избранное NexDownSave*"]
+            return 'В избранном пока ничего нет.', main_menu()
+        lines = ['<b>Избранное NexDownSave</b>']
         for item in items:
-            lines.append(f"• `{item['title']}` | {item['created_at']}")
-        return "\n".join(lines), pager("favorites", page, pages)
+            lines.append(f"• {html_code(item.title)} | {html_escape(item.created_at)}")
+        return '\n'.join(lines), pager('favorites', page, pages)
 
     def render_search(self, user_id: int, query: str) -> str:
         history_items = self.db.search_history(user_id, query, SEARCH_LIMIT)
         favorite_items = self.db.search_favorites(user_id, query, SEARCH_LIMIT)
         if not history_items and not favorite_items:
-            return f"Ничего не найдено по запросу: `{query}`"
-        lines = [f"*Поиск: {query}*"]
+            return f'Ничего не найдено по запросу: {html_code(query)}'
+        lines = [f'<b>Поиск:</b> {html_code(query)}']
         if history_items:
-            lines.append("")
-            lines.append("*История*")
+            lines.append('')
+            lines.append('<b>История</b>')
             for item in history_items:
-                lines.append(f"• `{item.title}` | `{item.status}`")
+                lines.append(f"• {html_code(item.title)} | <code>{html_escape(present_status(item.status))}</code>")
         if favorite_items:
-            lines.append("")
-            lines.append("*Избранное*")
+            lines.append('')
+            lines.append('<b>Избранное</b>')
             for item in favorite_items:
-                lines.append(f"• `{item['title']}`")
-        return "\n".join(lines)
+                lines.append(f"• {html_code(item.title)}")
+        return '\n'.join(lines)
 
     def render_status(self) -> str:
         return (
-            "*Состояние NexDownSave*\n\n"
-            f"• Очередь: *{self.queue.qsize()}*\n"
-            f"• Повторных попыток: *{self.settings.retry_attempts}*\n"
-            f"• Лимит файла: *{self.settings.max_file_mb} МБ*\n"
-            f"• Таймаут скачивания: *{self.settings.download_timeout} сек*\n"
-            f"• Таймаут ffmpeg: *{self.settings.ffmpeg_timeout} сек*"
+            '<b>Состояние NexDownSave</b>\n\n'
+            f'• Очередь: <b>{self.queue.qsize()}</b> из <b>{self.settings.queue_maxsize}</b>\n'
+            f'• Повторных попыток: <b>{self.settings.retry_attempts}</b>\n'
+            f'• Лимит файла: <b>{self.settings.max_file_mb} МБ</b>\n'
+            f'• Таймаут скачивания: <b>{self.settings.download_timeout} сек</b>\n'
+            f'• Таймаут ffmpeg: <b>{self.settings.ffmpeg_timeout} сек</b>\n'
+            f'• Интервал опроса очереди: <b>{self.settings.queue_poll_interval:.1f} сек</b>'
         )
 
     def render_metadata_card(self, metadata: AudioMetadata | None, file_size: int) -> str:
-        if metadata is None:
-            return "◆ NexDownSave\n└ Размер: " + human_size(file_size)
-
-        parts = ["◆ NexDownSave", f"├ Размер: {human_size(file_size)}"]
-        if metadata.artist:
-            parts.append(f"├ Исполнитель: {metadata.artist}")
-        if metadata.album:
-            parts.append(f"├ Альбом: {metadata.album}")
-        if metadata.duration_seconds is not None:
-            minutes = int(metadata.duration_seconds // 60)
-            seconds = int(metadata.duration_seconds % 60)
-            parts.append(f"├ Длительность: {minutes}:{seconds:02d}")
-        if metadata.bitrate_kbps:
-            parts.append(f"├ Битрейт: {metadata.bitrate_kbps} kbps")
-        if metadata.codec:
-            parts.append(f"└ Кодек: {metadata.codec}")
-        elif len(parts) > 1:
-            last = parts.pop()
-            parts.append(last.replace("├ ", "└ ", 1))
-        return "\n".join(parts)
+        details = [f'Размер: {human_size(file_size)}']
+        if metadata is not None:
+            if metadata.artist:
+                details.append(f'Исполнитель: {metadata.artist}')
+            if metadata.album:
+                details.append(f'Альбом: {metadata.album}')
+            duration = human_duration(metadata.duration_seconds)
+            if duration:
+                details.append(f'Длительность: {duration}')
+            if metadata.bitrate_kbps:
+                details.append(f'Битрейт: {metadata.bitrate_kbps} kbps')
+            if metadata.codec:
+                details.append(f'Кодек: {metadata.codec}')
+        lines = ['◆ NexDownSave']
+        for index, detail in enumerate(details):
+            connector = '└' if index == len(details) - 1 else '├'
+            lines.append(f'{connector} {detail}')
+        return '\n'.join(lines)
 
     async def handle_text(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        del ctx
         message = update.message
         user = update.effective_user
         if message is None or user is None:
             return
         self.db.upsert_user(user.id, user.first_name, user.username)
-        self.db.increment_stat("requests")
+        self.db.increment_stat('requests')
 
-        url = extract_url(message.text or "")
+        url = extract_url(message.text or '')
         if not url:
-            await message.reply_text("◌ Пришли прямую аудиоссылку или загрузи файл.", reply_markup=main_menu())
+            await message.reply_text('◌ Пришли прямую аудиоссылку или загрузи файл.', reply_markup=main_menu())
             return
         if not looks_like_direct_audio_url(url):
             await message.reply_text(
-                "◌ NexDownSave принимает только прямые ссылки на аудиофайлы. Пришли ссылку с аудиорасширением или загрузи файл.",
+                '◌ NexDownSave принимает только прямые ссылки на аудиофайлы. Пришли ссылку с аудиорасширением или загрузи файл.',
                 reply_markup=main_menu(),
             )
             return
+        if self.queue.full():
+            await self.reply_queue_busy(message)
+            return
 
-        history_id = self.db.add_history(user.id, "url", url, source_title_from_url(url), 0, "queued")
-        status = await message.reply_text(f"◌ Задача принята в очередь NexDownSave\n└ Позиция: {self.queue.qsize() + 1}")
-        await self.queue.put(
+        history_id = self.db.add_history(user.id, 'url', url, source_title_from_url(url), 0, 'queued')
+        await self.enqueue_job(
+            message,
             QueueJob(
                 user_id=user.id,
                 chat_id=message.chat_id,
                 history_id=history_id,
-                source_type="url",
+                source_type='url',
                 source_value=url,
-                status_message_id=status.message_id,
-            )
+            ),
+            '◌ Задача принята в очередь NexDownSave',
         )
 
     async def handle_media(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        del ctx
         message = update.message
         user = update.effective_user
         if message is None or user is None:
             return
         self.db.upsert_user(user.id, user.first_name, user.username)
-        self.db.increment_stat("requests")
+        self.db.increment_stat('requests')
 
         media = message.audio or message.document
         if media is None:
             return
+        file_size = getattr(media, 'file_size', None)
+        if file_size is not None and file_size > self.settings.max_file_bytes:
+            await message.reply_text(f'◌ Файл больше {self.settings.max_file_mb} МБ и не будет принят в очередь.')
+            return
+        if self.queue.full():
+            await self.reply_queue_busy(message)
+            return
 
+        file_name = getattr(media, 'file_name', None)
+        title = file_name or getattr(media, 'title', None) or 'upload'
         history_id = self.db.add_history(
             user.id,
-            "upload",
+            'upload',
             media.file_id,
-            getattr(media, "file_name", None) or "upload",
+            title,
             0,
-            "queued",
+            'queued',
         )
-        status = await message.reply_text(f"◌ Файл принят в очередь NexDownSave\n└ Позиция: {self.queue.qsize() + 1}")
-        await self.queue.put(
+        await self.enqueue_job(
+            message,
             QueueJob(
                 user_id=user.id,
                 chat_id=message.chat_id,
                 history_id=history_id,
-                source_type="upload",
+                source_type='upload',
                 source_value=media.file_id,
                 file_id=media.file_id,
-                file_name=getattr(media, "file_name", None) or f"upload_{media.file_unique_id}",
-                status_message_id=status.message_id,
-            )
+                file_name=file_name or f'upload_{media.file_unique_id}',
+            ),
+            '◌ Файл принят в очередь NexDownSave',
         )
 
     async def process_job(self, app: Application, job: QueueJob) -> None:
         bot = app.bot
         async with self.get_lock(job.user_id):
-            if job.status_message_id is not None:
-                await bot.edit_message_text(
-                    chat_id=job.chat_id,
-                    message_id=job.status_message_id,
-                    text="◌ NexDownSave обрабатывает задачу\n└ Подготавливаю аудио...",
+            try:
+                await self.safe_edit_status_message(
+                    bot,
+                    job,
+                    '◌ NexDownSave обрабатывает задачу\n└ Подготавливаю аудио...',
                 )
-            await bot.send_chat_action(chat_id=job.chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+                await bot.send_chat_action(chat_id=job.chat_id, action=ChatAction.UPLOAD_DOCUMENT)
 
-            if job.source_type == "url":
-                result = await self.pipeline.download_direct_url(job.source_value)
-                if not result.ok or result.output_path is None or result.title is None:
-                    self.db.increment_stat("errors")
-                    self.db.update_history_status(job.history_id, "failed")
-                    if job.status_message_id is not None:
-                        await bot.edit_message_text(chat_id=job.chat_id, message_id=job.status_message_id, text=result.message)
+                if job.source_type == 'url':
+                    result = await self.pipeline.download_direct_url(job.source_value)
+                    if not result.ok or result.output_path is None or result.title is None:
+                        await self.fail_job(bot, job, result.message)
+                        return
+                    await self.send_result(bot, job, result)
+                    self.db.increment_stat('direct_downloads')
                     return
-                await self.send_result(bot, job, result)
-                self.db.increment_stat("direct_downloads")
-                return
 
-            if job.source_type == "upload" and job.file_id is not None and job.file_name is not None:
-                job_dir = self.pipeline.reserve_job_dir()
-                local_path = job_dir / safe_filename(job.file_name)
-                telegram_file = await bot.get_file(job.file_id)
-                await telegram_file.download_to_drive(custom_path=str(local_path))
-                result = await self.pipeline.prepare_uploaded_file(local_path)
-                if not result.ok or result.output_path is None or result.title is None:
-                    self.db.increment_stat("errors")
-                    self.db.update_history_status(job.history_id, "failed")
-                    self.pipeline.cleanup_job_dir(job_dir)
-                    if job.status_message_id is not None:
-                        await bot.edit_message_text(chat_id=job.chat_id, message_id=job.status_message_id, text=result.message)
-                    return
-                await self.send_result(bot, job, result)
-                self.db.increment_stat("uploaded_files")
-                self.pipeline.cleanup_job_dir(job_dir)
-                return
+                if job.source_type == 'upload' and job.file_id is not None and job.file_name is not None:
+                    job_dir = self.pipeline.reserve_job_dir()
+                    try:
+                        local_path = job_dir / safe_filename(job.file_name)
+                        telegram_file = await bot.get_file(job.file_id)
+                        await telegram_file.download_to_drive(custom_path=str(local_path))
+                        result = await self.pipeline.prepare_uploaded_file(local_path)
+                        if not result.ok or result.output_path is None or result.title is None:
+                            await self.fail_job(bot, job, result.message)
+                            return
+                        await self.send_result(bot, job, result)
+                        self.db.increment_stat('uploaded_files')
+                        return
+                    finally:
+                        self.pipeline.cleanup_job_dir(job_dir)
 
-            self.db.increment_stat("errors")
-            self.db.update_history_status(job.history_id, "failed")
-            if job.status_message_id is not None:
-                await bot.edit_message_text(chat_id=job.chat_id, message_id=job.status_message_id, text="Неподдерживаемый тип задачи.")
+                await self.fail_job(bot, job, 'Неподдерживаемый тип задачи.')
+            except Exception:
+                logger.exception('Queue job failed for history_id=%s', job.history_id)
+                await self.fail_job(
+                    bot,
+                    job,
+                    '◌ Внутренняя ошибка NexDownSave\n└ Попробуй еще раз позже.',
+                )
 
-    async def send_result(self, bot, job: QueueJob, result: ProcessResult) -> None:
+    async def send_result(self, bot: Bot, job: QueueJob, result: ProcessResult) -> None:
         if result.output_path is None or result.title is None:
             return
         caption = self.render_metadata_card(result.metadata, result.file_size)
         performer = result.metadata.artist if result.metadata and result.metadata.artist else None
-        if job.status_message_id is not None:
-            await bot.edit_message_text(
-                chat_id=job.chat_id,
-                message_id=job.status_message_id,
-                text=f"◌ NexDownSave отправляет результат\n└ Размер: {human_size(result.file_size)}",
-            )
-        with open(result.output_path, "rb") as audio_file:
-            await bot.send_audio(
-                chat_id=job.chat_id,
-                audio=audio_file,
-                filename=result.output_path.name,
-                title=result.title,
-                performer=performer,
-                caption=caption,
-                reply_markup=result_actions(job.history_id),
-            )
-        self.db.update_history_status(job.history_id, "done", file_size=result.file_size, title=result.title)
-        if job.status_message_id is not None:
-            await bot.delete_message(chat_id=job.chat_id, message_id=job.status_message_id)
-        if result.output_path.parent.exists():
-            self.pipeline.cleanup_job_dir(result.output_path.parent)
+        await self.safe_edit_status_message(
+            bot,
+            job,
+            f'◌ NexDownSave отправляет результат\n└ Размер: {human_size(result.file_size)}',
+        )
+        try:
+            with result.output_path.open('rb') as audio_file:
+                await bot.send_audio(
+                    chat_id=job.chat_id,
+                    audio=audio_file,
+                    filename=result.output_path.name,
+                    title=result.title,
+                    performer=performer,
+                    caption=caption,
+                    reply_markup=result_actions(job.history_id),
+                )
+        finally:
+            if result.output_path.parent.exists():
+                self.pipeline.cleanup_job_dir(result.output_path.parent)
+        self.db.update_history_status(job.history_id, 'done', file_size=result.file_size, title=result.title)
+        await self.safe_delete_status_message(bot, job)
+
+    @staticmethod
+    def parse_callback_int(data: str, prefix: str) -> int | None:
+        if not data.startswith(prefix):
+            return None
+        try:
+            value = int(data.split(':', 1)[1])
+        except ValueError:
+            return None
+        return value if value > 0 else None
 
     async def handle_callback(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        del ctx
         query = update.callback_query
         user = update.effective_user
-        if query is None or user is None:
+        message = query.message if query is not None else None
+        if query is None or user is None or message is None:
             return
         await query.answer()
 
-        if query.data == "noop":
+        data = query.data or ''
+        if data == 'noop':
             return
-        if query.data == "menu:main":
-            await query.message.reply_text("Главное меню NexDownSave", reply_markup=main_menu())
+        if data == 'menu:main':
+            await message.reply_text('Главное меню NexDownSave', reply_markup=main_menu())
             return
-        if query.data == "menu:help":
-            await query.message.reply_text(
-                "Пришли прямую ссылку на аудиофайл или загрузи аудио/документ. NexDownSave поставит задачу в очередь, проверит аудиопоток и вернет MP3."
+        if data == 'menu:help':
+            await message.reply_text(
+                'Пришли прямую ссылку на аудиофайл или загрузи аудио или документ. '
+                'NexDownSave поставит задачу в очередь, проверит аудиопоток и вернет MP3.'
             )
             return
-        if query.data == "menu:stats":
-            await query.message.reply_text(self.render_stats(), parse_mode=ParseMode.MARKDOWN)
+        if data == 'menu:stats':
+            await message.reply_text(self.render_stats(), parse_mode=ParseMode.HTML)
             return
-        if query.data == "menu:search":
-            await query.message.reply_text("Используй `/search название` для поиска по истории и избранному.", parse_mode=ParseMode.MARKDOWN)
+        if data == 'menu:search':
+            await message.reply_text(
+                'Используй <code>/search название</code> для поиска по истории и избранному.',
+                parse_mode=ParseMode.HTML,
+            )
             return
-        if query.data == "menu:status":
-            await query.message.reply_text(self.render_status(), parse_mode=ParseMode.MARKDOWN)
+        if data == 'menu:status':
+            await message.reply_text(self.render_status(), parse_mode=ParseMode.HTML)
             return
-        if query.data.startswith("history:"):
-            page = int(query.data.split(":", 1)[1])
+        if data.startswith('history:'):
+            page = self.parse_callback_int(data, 'history:')
+            if page is None:
+                return
             text, markup = self.render_history_page(user.id, page)
-            await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=markup)
+            await query.edit_message_text(text=text, parse_mode=ParseMode.HTML, reply_markup=markup)
             return
-        if query.data.startswith("favorites:"):
-            page = int(query.data.split(":", 1)[1])
+        if data.startswith('favorites:'):
+            page = self.parse_callback_int(data, 'favorites:')
+            if page is None:
+                return
             text, markup = self.render_favorites_page(user.id, page)
-            await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=markup)
+            await query.edit_message_text(text=text, parse_mode=ParseMode.HTML, reply_markup=markup)
             return
-        if query.data.startswith("fav:"):
-            history_id = int(query.data.split(":", 1)[1])
+        if data.startswith('fav:'):
+            history_id = self.parse_callback_int(data, 'fav:')
+            if history_id is None:
+                return
             target = self.db.get_history_item(user.id, history_id)
             if target is None:
-                await query.message.reply_text("◌ Запись истории не найдена.")
+                await message.reply_text('◌ Запись истории не найдена.')
                 return
             created = self.db.add_favorite(user.id, target.source_type, target.source_value, target.title)
             if created:
-                self.db.increment_stat("favorites_added")
-                await query.message.reply_text(f"◆ Добавлено в избранное NexDownSave\n└ {target.title}")
+                self.db.increment_stat('favorites_added')
+                await message.reply_text(f'◆ Добавлено в избранное NexDownSave\n└ {target.title}')
             else:
-                await query.message.reply_text("◌ Этот элемент уже есть в избранном.")
+                await message.reply_text('◌ Этот элемент уже есть в избранном.')
             return
-        if query.data.startswith("repeat:"):
-            history_id = int(query.data.split(":", 1)[1])
+        if data.startswith('repeat:'):
+            history_id = self.parse_callback_int(data, 'repeat:')
+            if history_id is None:
+                return
             target = self.db.get_history_item(user.id, history_id)
             if target is None:
-                await query.message.reply_text("◌ Запись истории не найдена.")
+                await message.reply_text('◌ Запись истории не найдена.')
                 return
-            if target.source_type != "url":
-                await query.message.reply_text("◌ Повтор доступен только для прямых ссылок.")
+            if target.source_type != 'url':
+                await message.reply_text('◌ Повтор доступен только для прямых ссылок.')
                 return
-            new_history_id = self.db.add_history(user.id, "url", target.source_value, target.title, 0, "queued")
-            status = await query.message.reply_text(f"◌ Повторно добавлено в очередь NexDownSave\n└ {target.title}")
-            await self.queue.put(
+            if self.queue.full():
+                await self.reply_queue_busy(message)
+                return
+            new_history_id = self.db.add_history(user.id, 'url', target.source_value, target.title, 0, 'queued')
+            await self.enqueue_job(
+                message,
                 QueueJob(
                     user_id=user.id,
-                    chat_id=query.message.chat_id,
+                    chat_id=message.chat_id,
                     history_id=new_history_id,
-                    source_type="url",
+                    source_type='url',
                     source_value=target.source_value,
-                    status_message_id=status.message_id,
-                )
+                ),
+                f'◌ Повторно добавлено в очередь NexDownSave\n└ {target.title}',
             )
 
     async def error_handler(self, update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        logger.exception("Unhandled error", exc_info=ctx.error)
+        del update
+        logger.exception('Unhandled error', exc_info=ctx.error)
 
 
 async def on_post_init(application: Application) -> None:
-    bot_app: BotApp = application.bot_data["bot_app"]
+    bot_app: BotApp = application.bot_data['bot_app']
     await bot_app.start_worker(application)
 
 
 async def on_shutdown(application: Application) -> None:
-    bot_app: BotApp = application.bot_data["bot_app"]
+    bot_app: BotApp = application.bot_data['bot_app']
     await bot_app.stop_worker()
-
 
 
 def main() -> None:
@@ -507,7 +615,7 @@ def main() -> None:
     setup_logging(settings)
 
     if not settings.bot_token:
-        raise SystemExit("Укажи BOT_TOKEN перед запуском NexDownSave")
+        raise SystemExit('Укажи BOT_TOKEN перед запуском NexDownSave')
 
     bot_app = BotApp(settings)
     missing = bot_app.pipeline.check_dependencies()
@@ -517,27 +625,28 @@ def main() -> None:
     application = (
         Application.builder()
         .token(settings.bot_token)
+        .concurrent_updates(False)
         .post_init(on_post_init)
         .post_shutdown(on_shutdown)
         .build()
     )
-    application.bot_data["bot_app"] = bot_app
-    application.add_handler(CommandHandler("start", bot_app.cmd_start))
-    application.add_handler(CommandHandler("help", bot_app.cmd_help))
-    application.add_handler(CommandHandler("stats", bot_app.cmd_stats))
-    application.add_handler(CommandHandler("history", bot_app.cmd_history))
-    application.add_handler(CommandHandler("favorites", bot_app.cmd_favorites))
-    application.add_handler(CommandHandler("status", bot_app.cmd_status))
-    application.add_handler(CommandHandler("search", bot_app.cmd_search))
-    application.add_handler(CommandHandler("admin", bot_app.cmd_admin))
+    application.bot_data['bot_app'] = bot_app
+    application.add_handler(CommandHandler('start', bot_app.cmd_start))
+    application.add_handler(CommandHandler('help', bot_app.cmd_help))
+    application.add_handler(CommandHandler('stats', bot_app.cmd_stats))
+    application.add_handler(CommandHandler('history', bot_app.cmd_history))
+    application.add_handler(CommandHandler('favorites', bot_app.cmd_favorites))
+    application.add_handler(CommandHandler('status', bot_app.cmd_status))
+    application.add_handler(CommandHandler('search', bot_app.cmd_search))
+    application.add_handler(CommandHandler('admin', bot_app.cmd_admin))
     application.add_handler(CallbackQueryHandler(bot_app.handle_callback))
     application.add_handler(MessageHandler(filters.AUDIO | filters.Document.ALL, bot_app.handle_media))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot_app.handle_text))
     application.add_error_handler(bot_app.error_handler)
 
-    logger.info("NexDownSave started")
+    logger.info(
+        'NexDownSave started with queue_maxsize=%s history_limit=%s',
+        settings.queue_maxsize,
+        settings.history_limit,
+    )
     application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-
-if __name__ == "__main__":
-    main()

@@ -5,7 +5,7 @@ PYTHON := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
 SERVICE := nexdownsave
 
-.PHONY: help venv install env run compile health backup brand-assets service-install service-restart service-status logs clean
+.PHONY: help venv install env run compile test check health backup brand-assets service-install service-restart service-status logs clean
 
 help:
 	@echo "NexDownSave commands:"
@@ -14,6 +14,8 @@ help:
 	@echo "  make env              - create .env from template if missing"
 	@echo "  make run              - run bot locally"
 	@echo "  make compile          - syntax check project"
+	@echo "  make test             - run unit tests"
+	@echo "  make check            - run compile and unit tests"
 	@echo "  make health           - run healthcheck"
 	@echo "  make backup           - create SQLite backup"
 	@echo "  make brand-assets     - generate local brand PNG assets"
@@ -38,6 +40,11 @@ run:
 
 compile:
 	$(PYTHON) -m compileall $(PROJECT_DIR)
+
+test:
+	cd $(PROJECT_DIR) && $(PYTHON) -m unittest discover -s tests -p 'test_*.py'
+
+check: compile test
 
 health:
 	cd $(PROJECT_DIR) && $(PYTHON) healthcheck.py

@@ -1,12 +1,29 @@
 from __future__ import annotations
 
+from html import escape
 import re
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
-DIRECT_AUDIO_EXTENSIONS = (".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac", ".opus")
-URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+DIRECT_AUDIO_EXTENSIONS = (
+    '.mp3',
+    '.m4a',
+    '.wav',
+    '.ogg',
+    '.flac',
+    '.aac',
+    '.opus',
+    '.wma',
+    '.aif',
+    '.aiff',
+)
+URL_RE = re.compile(r'https?://\S+', re.IGNORECASE)
+STATUS_LABELS = {
+    'queued': 'в очереди',
+    'done': 'готово',
+    'failed': 'ошибка',
+}
 
 
 def extract_url(text: str) -> Optional[str]:
@@ -19,33 +36,46 @@ def looks_like_direct_audio_url(url: str) -> bool:
     return path.endswith(DIRECT_AUDIO_EXTENSIONS)
 
 
-def looks_like_music_url(url: str) -> bool:
-    music_domains = (
-        "vk.com",
-        "vkontakte.ru",
-        "music.yandex",
-        "yandex.ru/music",
-        "spotify.com",
-        "soundcloud.com",
-        "youtube.com",
-        "youtu.be",
-    )
-    return any(domain in url.lower() for domain in music_domains)
-
-
 def human_size(size: int) -> str:
     value = float(size)
-    for unit in ("B", "KB", "MB", "GB"):
-        if value < 1024 or unit == "GB":
-            return f"{value:.1f} {unit}"
+    for unit in ('B', 'KB', 'MB', 'GB'):
+        if value < 1024 or unit == 'GB':
+            return f'{value:.1f} {unit}'
         value /= 1024
-    return f"{size} B"
+    return f'{size} B'
+
+
+def human_duration(duration_seconds: float | None) -> str | None:
+    if duration_seconds is None:
+        return None
+    total_seconds = max(0, int(duration_seconds))
+    minutes, seconds = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f'{hours}:{minutes:02d}:{seconds:02d}'
+    return f'{minutes}:{seconds:02d}'
 
 
 def safe_filename(name: str) -> str:
-    cleaned = re.sub(r"[^\w\-. ]+", "_", name, flags=re.UNICODE).strip()
-    return cleaned[:120] or "audio"
+    cleaned = re.sub(r'[^\w\-. ]+', '_', name, flags=re.UNICODE).strip()
+    return cleaned[:120] or 'audio'
 
 
 def source_title_from_url(url: str) -> str:
-    return safe_filename(Path(urlparse(url).path).stem or "audio")
+    return safe_filename(unquote(Path(urlparse(url).path).stem) or 'audio')
+
+
+def source_filename_from_url(url: str) -> str:
+    return safe_filename(unquote(Path(urlparse(url).path).name) or 'audio')
+
+
+def html_escape(value: object) -> str:
+    return escape(str(value), quote=False)
+
+
+def html_code(value: object) -> str:
+    return f'<code>{html_escape(value)}</code>'
+
+
+def present_status(status: str) -> str:
+    return STATUS_LABELS.get(status, status)

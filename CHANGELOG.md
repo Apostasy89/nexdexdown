@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.0 - 2026-06-17
+
+- switched bot text rendering to safe HTML to eliminate Markdown escaping bugs with user content
+- added queue backpressure via `QUEUE_MAXSIZE` and earlier file-size rejection for uploads
+- improved SQLite initialization with pragmas, indexes, and typed favorite records
+- hardened healthcheck and systemd startup so first deployment no longer fails on a missing database
+- added unit tests, `make test`, `make check`, and a GitHub Actions CI workflow
+- improved backup retention logic and deployment scripts
+
 ## 1.0.0 - 2026-06-16
 
 - initial GitHub-ready NexDownSave release

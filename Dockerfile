@@ -1,7 +1,10 @@
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DB_PATH=/app/data/music_bot.sqlite3 \
+    LOG_PATH=/app/data/bot.log
 
 WORKDIR /app
 
@@ -15,8 +18,8 @@ RUN apt-get update \
 
 COPY requirements.txt /app/requirements.txt
 
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r /app/requirements.txt
+RUN pip install --upgrade pip \
+    && pip install -r /app/requirements.txt
 
 COPY . /app
 

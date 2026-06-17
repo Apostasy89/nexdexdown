@@ -20,6 +20,15 @@ class HistoryItem:
     created_at: str
 
 
+@dataclass
+class FavoriteItem:
+    id: int
+    source_type: str
+    source_value: str
+    title: str
+    created_at: str
+
+
 class Database:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -28,8 +37,10 @@ class Database:
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, timeout=30)
         conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA foreign_keys=ON')
+        conn.execute('PRAGMA busy_timeout=5000')
         try:
             yield conn
             conn.commit()
@@ -41,6 +52,7 @@ class Database:
             conn.executescript(
                 """
                 PRAGMA journal_mode=WAL;
+                PRAGMA synchronous=NORMAL;
 
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
@@ -74,17 +86,22 @@ class Database:
                     title TEXT NOT NULL,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 );
+
+                CREATE INDEX IF NOT EXISTS idx_history_user_id ON history(user_id, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_history_user_status ON history(user_id, status, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_favorites_user_id ON favorites(user_id, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_favorites_user_source ON favorites(user_id, source_value);
                 """
             )
             for key in (
-                "requests",
-                "direct_downloads",
-                "uploaded_files",
-                "errors",
-                "favorites_added",
-                "search_requests",
+                'requests',
+                'direct_downloads',
+                'uploaded_files',
+                'errors',
+                'favorites_added',
+                'search_requests',
             ):
-                conn.execute("INSERT OR IGNORE INTO stats(key, value) VALUES(?, 0)", (key,))
+                conn.execute('INSERT OR IGNORE INTO stats(key, value) VALUES(?, 0)', (key,))
 
     def upsert_user(self, user_id: int, first_name: str | None, username: str | None) -> None:
         with self.connect() as conn:
@@ -102,18 +119,26 @@ class Database:
 
     def increment_stat(self, key: str, amount: int = 1) -> None:
         with self.connect() as conn:
-            conn.execute("UPDATE stats SET value = value + ? WHERE key = ?", (amount, key))
+            conn.execute('UPDATE stats SET value = value + ? WHERE key = ?', (amount, key))
 
     def get_stats(self) -> dict[str, int]:
         with self.connect() as conn:
-            rows = conn.execute("SELECT key, value FROM stats").fetchall()
-            result = {row["key"]: row["value"] for row in rows}
-            result["users"] = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-            result["history"] = conn.execute("SELECT COUNT(*) FROM history").fetchone()[0]
-            result["favorites"] = conn.execute("SELECT COUNT(*) FROM favorites").fetchone()[0]
+            rows = conn.execute('SELECT key, value FROM stats').fetchall()
+            result = {row['key']: row['value'] for row in rows}
+            result['users'] = conn.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+            result['history'] = conn.execute('SELECT COUNT(*) FROM history').fetchone()[0]
+            result['favorites'] = conn.execute('SELECT COUNT(*) FROM favorites').fetchone()[0]
             return result
 
-    def add_history(self, user_id: int, source_type: str, source_value: str, title: str, file_size: int, status: str) -> int:
+    def add_history(
+        self,
+        user_id: int,
+        source_type: str,
+        source_value: str,
+        title: str,
+        file_size: int,
+        status: str,
+    ) -> int:
         with self.connect() as conn:
             cursor = conn.execute(
                 """
@@ -124,7 +149,13 @@ class Database:
             )
             return int(cursor.lastrowid)
 
-    def update_history_status(self, history_id: int, status: str, file_size: int | None = None, title: str | None = None) -> None:
+    def update_history_status(
+        self,
+        history_id: int,
+        status: str,
+        file_size: int | None = None,
+        title: str | None = None,
+    ) -> None:
         with self.connect() as conn:
             conn.execute(
                 """
@@ -140,13 +171,16 @@ class Database:
     def _rows_to_history(self, rows: list[sqlite3.Row]) -> list[HistoryItem]:
         return [HistoryItem(**dict(row)) for row in rows]
 
+    def _rows_to_favorites(self, rows: list[sqlite3.Row]) -> list[FavoriteItem]:
+        return [FavoriteItem(**dict(row)) for row in rows]
+
     def count_history(self, user_id: int) -> int:
         with self.connect() as conn:
-            return conn.execute("SELECT COUNT(*) FROM history WHERE user_id = ?", (user_id,)).fetchone()[0]
+            return conn.execute('SELECT COUNT(*) FROM history WHERE user_id = ?', (user_id,)).fetchone()[0]
 
     def count_favorites(self, user_id: int) -> int:
         with self.connect() as conn:
-            return conn.execute("SELECT COUNT(*) FROM favorites WHERE user_id = ?", (user_id,)).fetchone()[0]
+            return conn.execute('SELECT COUNT(*) FROM favorites WHERE user_id = ?', (user_id,)).fetchone()[0]
 
     def get_history_page(self, user_id: int, page: int, page_size: int) -> tuple[list[HistoryItem], int]:
         total = self.count_history(user_id)
@@ -201,18 +235,18 @@ class Database:
     def add_favorite(self, user_id: int, source_type: str, source_value: str, title: str) -> bool:
         with self.connect() as conn:
             exists = conn.execute(
-                "SELECT 1 FROM favorites WHERE user_id = ? AND source_value = ? LIMIT 1",
+                'SELECT 1 FROM favorites WHERE user_id = ? AND source_value = ? LIMIT 1',
                 (user_id, source_value),
             ).fetchone()
             if exists is not None:
                 return False
             conn.execute(
-                "INSERT INTO favorites(user_id, source_type, source_value, title) VALUES(?, ?, ?, ?)",
+                'INSERT INTO favorites(user_id, source_type, source_value, title) VALUES(?, ?, ?, ?)',
                 (user_id, source_type, source_value, title),
             )
             return True
 
-    def get_favorites_page(self, user_id: int, page: int, page_size: int) -> tuple[list[sqlite3.Row], int]:
+    def get_favorites_page(self, user_id: int, page: int, page_size: int) -> tuple[list[FavoriteItem], int]:
         total = self.count_favorites(user_id)
         pages = max(1, math.ceil(total / page_size)) if total else 1
         page = max(1, min(page, pages))
@@ -228,16 +262,16 @@ class Database:
                 """,
                 (user_id, page_size, offset),
             ).fetchall()
-            return rows, pages
+            return self._rows_to_favorites(rows), pages
 
-    def get_favorites(self, user_id: int, limit: int) -> list[sqlite3.Row]:
+    def get_favorites(self, user_id: int, limit: int) -> list[FavoriteItem]:
         items, _ = self.get_favorites_page(user_id, 1, limit)
         return items
 
-    def search_favorites(self, user_id: int, query: str, limit: int) -> list[sqlite3.Row]:
+    def search_favorites(self, user_id: int, query: str, limit: int) -> list[FavoriteItem]:
         pattern = f"%{query.strip()}%"
         with self.connect() as conn:
-            return conn.execute(
+            rows = conn.execute(
                 """
                 SELECT id, source_type, source_value, title, created_at
                 FROM favorites
@@ -247,10 +281,11 @@ class Database:
                 """,
                 (user_id, pattern, pattern, limit),
             ).fetchall()
+            return self._rows_to_favorites(rows)
 
-    def get_global_summary(self) -> sqlite3.Row:
+    def get_global_summary(self) -> dict[str, int]:
         with self.connect() as conn:
-            return conn.execute(
+            row = conn.execute(
                 """
                 SELECT
                     (SELECT COUNT(*) FROM users) AS users,
@@ -260,3 +295,4 @@ class Database:
                     (SELECT COUNT(*) FROM history WHERE status = 'failed') AS failed
                 """
             ).fetchone()
+            return {key: row[key] for key in row.keys()} if row else {}

@@ -9,3 +9,6 @@ downloads
 temp
 tmp
 output
+.pytest_cache
+.mypy_cache
+.ruff_cache

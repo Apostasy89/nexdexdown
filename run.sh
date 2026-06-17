@@ -14,6 +14,8 @@ Usage:
   ./run.sh env              Create .env from .env.example if missing
   ./run.sh run              Run bot locally
   ./run.sh compile          Syntax check project
+  ./run.sh test             Run unit tests
+  ./run.sh check            Run compile and unit tests
   ./run.sh health           Run healthcheck
   ./run.sh backup           Create database backup
   ./run.sh brand-assets     Generate local brand PNG assets
@@ -55,6 +57,17 @@ cmd_run() {
 cmd_compile() {
   ensure_venv
   "$PYTHON" -m compileall "$PROJECT_DIR"
+}
+
+cmd_test() {
+  ensure_venv
+  cd "$PROJECT_DIR"
+  "$PYTHON" -m unittest discover -s tests -p 'test_*.py'
+}
+
+cmd_check() {
+  cmd_compile
+  cmd_test
 }
 
 cmd_health() {
@@ -101,6 +114,8 @@ case "${1:-help}" in
   env) cmd_env ;;
   run) cmd_run ;;
   compile) cmd_compile ;;
+  test) cmd_test ;;
+  check) cmd_check ;;
   health) cmd_health ;;
   backup) cmd_backup ;;
   brand-assets) cmd_brand_assets ;;

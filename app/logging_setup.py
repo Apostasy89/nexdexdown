@@ -6,6 +6,7 @@ from logging.handlers import RotatingFileHandler
 from .config import Settings
 
 
+
 def setup_logging(settings: Settings) -> None:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.temp_dir.mkdir(parents=True, exist_ok=True)

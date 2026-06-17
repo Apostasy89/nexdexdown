@@ -3,6 +3,7 @@ from __future__ import annotations
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 
+
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -22,6 +23,7 @@ def main_menu() -> InlineKeyboardMarkup:
     )
 
 
+
 def result_actions(history_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -34,11 +36,15 @@ def result_actions(history_id: int) -> InlineKeyboardMarkup:
     )
 
 
+
 def pager(kind: str, page: int, pages: int) -> InlineKeyboardMarkup:
+    buttons = []
     row = []
     if page > 1:
         row.append(InlineKeyboardButton("◀", callback_data=f"{kind}:{page - 1}"))
     row.append(InlineKeyboardButton(f"{page}/{pages}", callback_data="noop"))
     if page < pages:
         row.append(InlineKeyboardButton("▶", callback_data=f"{kind}:{page + 1}"))
-    return InlineKeyboardMarkup([row, [InlineKeyboardButton("Главное меню", callback_data="menu:main")]])
+    buttons.append(row)
+    buttons.append([InlineKeyboardButton("Главное меню", callback_data="menu:main")])
+    return InlineKeyboardMarkup(buttons)
