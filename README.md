@@ -8,14 +8,17 @@
   <img src="assets/brand/github-banner.png" alt="NexDownSave GitHub banner" width="100%">
 </p>
 
-NexDownSave is a production-oriented Telegram bot for direct audio links and uploaded audio files. It focuses on predictable processing, clean Russian-first UX, and maintainable deployment on Ubuntu.
+NexDownSave is a production-oriented Telegram bot for track links, public music pages, and uploaded audio files. It focuses on predictable processing, clean Russian-first UX, and maintainable deployment on Ubuntu and Bothost.
 
 ## Highlights
 
 - Russian-first branded Telegram UX
 - safe HTML-formatted bot responses without Markdown escaping bugs
+- direct audio links and public track page links via `yt-dlp`
 - paginated history and favorites
-- in-bot library search
+- queue overview with `/queue` and in-bot menu shortcut
+- user-side queue cleanup via `/cancel` and menu button
+- repeat for both links and previously uploaded files
 - queue-based job processing with backpressure via `QUEUE_MAXSIZE`
 - MP3 conversion via `ffmpeg`
 - metadata-rich result cards via `ffprobe`
@@ -30,11 +33,12 @@ NexDownSave is a production-oriented Telegram bot for direct audio links and upl
 - `bot.py` - entry point
 - `app/config.py` - settings and `.env` loading
 - `app/main.py` - Telegram handlers, queue, UX, and orchestration
-- `app/services.py` - downloading, conversion, and metadata extraction
+- `app/services.py` - downloading, extraction, conversion, and metadata handling
 - `app/db.py` - SQLite persistence
 - `app/keyboards.py` - inline keyboards
 - `healthcheck.py` - runtime health probe
 - `backup_db.sh` - SQLite backup utility
+- `Dockerfile` - container build for Bothost and Docker deploys
 - `deploy/nexdownsave.service` - `systemd` service file
 - `deploy/install.sh` - first-time VPS setup helper
 - `tests/` - unit tests for critical logic
@@ -47,6 +51,8 @@ NexDownSave is a production-oriented Telegram bot for direct audio links and upl
 - `ffprobe`
 - `curl`
 - `sqlite3`
+
+Python dependencies are installed from `requirements.txt`, including `yt-dlp` for public track page extraction.
 
 ## Quick start
 
@@ -119,11 +125,9 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 python3 -m compileall .
 ```
 
-
-
 ## Bothost deployment
 
-Bothost builds bots inside Docker containers and supports custom `Dockerfile`. This repository includes a ready-to-use container build for Bothost with `ffmpeg`, `curl`, `sqlite3`, and persistent data in `/app/data`.
+Bothost builds bots inside Docker containers and supports custom `Dockerfile`. This repository includes a ready-to-use container build for Bothost with `ffmpeg`, `curl`, `sqlite3`, `yt-dlp`, and persistent data in `/app/data`.
 
 ### What to configure in Bothost
 
@@ -137,12 +141,6 @@ Bothost builds bots inside Docker containers and supports custom `Dockerfile`. T
 5. Keep database and logs in the default container paths:
    - `DB_PATH=/app/data/music_bot.sqlite3`
    - `LOG_PATH=/app/data/bot.log`
-
-### Why this works on Bothost
-
-- Bothost installs Python dependencies from the repo root and supports custom `Dockerfile` for system packages.
-- The bot needs `ffmpeg`, so plain `requirements.txt` alone is not enough.
-- The application stores runtime files in `data/`, which maps cleanly to Bothost persistent storage guidance.
 
 ### Recommended Bothost environment variables
 
@@ -205,6 +203,8 @@ Optional cron example:
 - `/start`
 - `/help`
 - `/stats`
+- `/queue`
+- `/cancel`
 - `/history`
 - `/favorites`
 - `/search <text>`
@@ -216,9 +216,10 @@ Optional cron example:
 NexDownSave supports:
 
 - direct links to audio files
+- public pages with track audio supported by `yt-dlp`
 - audio files uploaded by the user
 
-It does not support general webpage extraction or unsupported media sources.
+It does not bypass DRM, private content, or unsupported media sources.
 
 ## Security notes
 

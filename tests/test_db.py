@@ -30,8 +30,10 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(stats['requests'], 1)
         self.assertEqual(stats['users'], 1)
         self.assertEqual(stats['history'], 1)
+        self.assertEqual(self.db.count_history_by_status(1, 'queued'), 0)
+        self.assertEqual(self.db.count_history_by_status(1, 'done'), 1)
 
-    def test_pagination_search_and_favorites(self) -> None:
+    def test_pagination_search_queue_and_favorites(self) -> None:
         self.db.upsert_user(5, 'Alice', 'alice')
         for index in range(3):
             self.db.add_history(5, 'url', f'https://example.com/{index}.mp3', f'track {index}', 0, 'queued')
@@ -44,6 +46,11 @@ class DatabaseTests(unittest.TestCase):
         search_results = self.db.search_history(5, 'track 1', 10)
         self.assertEqual(len(search_results), 1)
         self.assertEqual(search_results[0].title, 'track 1')
+
+        queued_items = self.db.get_history_by_status(5, 'queued', 2)
+        self.assertEqual(len(queued_items), 2)
+        self.assertEqual(queued_items[0].title, 'track 2')
+        self.assertEqual(self.db.count_history_by_status(5, 'queued'), 3)
 
         created = self.db.add_favorite(5, 'url', 'https://example.com/1.mp3', 'track 1')
         duplicate = self.db.add_favorite(5, 'url', 'https://example.com/1.mp3', 'track 1')
@@ -58,6 +65,7 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(summary['users'], 1)
         self.assertEqual(summary['history_items'], 3)
         self.assertEqual(summary['favorites'], 1)
+        self.assertEqual(summary['queued'], 3)
 
 
 if __name__ == '__main__':

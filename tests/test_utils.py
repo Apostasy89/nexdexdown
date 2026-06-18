@@ -20,6 +20,10 @@ class UtilsTests(unittest.TestCase):
         text = 'Скачай https://example.com/music/test.mp3 пожалуйста'
         self.assertEqual(extract_url(text), 'https://example.com/music/test.mp3')
 
+    def test_extract_url_strips_common_chat_punctuation(self) -> None:
+        text = 'Проверь (https://example.com/music/test.mp3), пожалуйста!'
+        self.assertEqual(extract_url(text), 'https://example.com/music/test.mp3')
+
     def test_direct_audio_detection_supports_extended_extensions(self) -> None:
         self.assertTrue(looks_like_direct_audio_url('https://example.com/audio/file.aiff'))
         self.assertFalse(looks_like_direct_audio_url('https://example.com/page.html'))
@@ -43,6 +47,7 @@ class UtilsTests(unittest.TestCase):
 
     def test_present_status_maps_known_values(self) -> None:
         self.assertEqual(present_status('queued'), 'в очереди')
+        self.assertEqual(present_status('cancelled'), 'отменено')
         self.assertEqual(present_status('unknown'), 'unknown')
 
 

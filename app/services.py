@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import logging
 import shutil
+import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Settings
-from .utils import source_filename_from_url
+from .utils import looks_like_direct_audio_url, source_filename_from_url
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,8 @@ class AudioPipeline:
         for command in ('ffmpeg', 'ffprobe', 'curl'):
             if shutil.which(command) is None:
                 missing.append(command)
+        if importlib.util.find_spec('yt_dlp') is None:
+            missing.append('yt-dlp')
         return missing
 
     async def run_command(self, *args: str, timeout: int) -> tuple[int, str, str]:
@@ -124,6 +128,60 @@ class AudioPipeline:
                 last_message = 'Не удалось скачать файл.'
             self.cleanup_job_dir(job_dir)
         return ProcessResult(False, last_message)
+
+    def _pick_downloaded_audio_file(self, job_dir: Path) -> Path | None:
+        candidates = [
+            path
+            for path in job_dir.rglob('*')
+            if path.is_file() and path.suffix.lower() in ALLOWED_UPLOAD_EXTENSIONS
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: (item.stat().st_size, item.stat().st_mtime))
+
+    async def download_track_url(self, url: str) -> ProcessResult:
+        if looks_like_direct_audio_url(url):
+            direct_result = await self.download_direct_url(url)
+            if direct_result.ok:
+                return direct_result
+            logger.info('Direct download fallback triggered for %s: %s', url, direct_result.message)
+
+        job_dir = self.reserve_job_dir()
+        output_template = str(job_dir / '%(title).160B [%(id)s].%(ext)s')
+        timeout = self.settings.download_timeout + self.settings.ffmpeg_timeout + 120
+        code, _, err = await self.run_command(
+            sys.executable,
+            '-m',
+            'yt_dlp',
+            '--no-playlist',
+            '--no-progress',
+            '--no-warnings',
+            '--extract-audio',
+            '--audio-format',
+            'mp3',
+            '--audio-quality',
+            '0',
+            '--output',
+            output_template,
+            url,
+            timeout=timeout,
+        )
+        if code != 0:
+            logger.warning('yt-dlp failed for %s: %s', url, err)
+            self.cleanup_job_dir(job_dir)
+            if err == 'timeout':
+                return ProcessResult(False, 'Превышено время ожидания обработки ссылки.')
+            return ProcessResult(False, 'Не удалось извлечь аудио по этой ссылке.')
+
+        downloaded_path = self._pick_downloaded_audio_file(job_dir)
+        if downloaded_path is None:
+            self.cleanup_job_dir(job_dir)
+            return ProcessResult(False, 'После обработки ссылки аудиофайл не найден.')
+
+        result = await self.prepare_uploaded_file(downloaded_path)
+        if not result.ok:
+            self.cleanup_job_dir(job_dir)
+        return result
 
     async def prepare_uploaded_file(self, source_path: Path) -> ProcessResult:
         if not source_path.exists():

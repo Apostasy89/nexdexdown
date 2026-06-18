@@ -178,6 +178,13 @@ class Database:
         with self.connect() as conn:
             return conn.execute('SELECT COUNT(*) FROM history WHERE user_id = ?', (user_id,)).fetchone()[0]
 
+    def count_history_by_status(self, user_id: int, status: str) -> int:
+        with self.connect() as conn:
+            return conn.execute(
+                'SELECT COUNT(*) FROM history WHERE user_id = ? AND status = ?',
+                (user_id, status),
+            ).fetchone()[0]
+
     def count_favorites(self, user_id: int) -> int:
         with self.connect() as conn:
             return conn.execute('SELECT COUNT(*) FROM favorites WHERE user_id = ?', (user_id,)).fetchone()[0]
@@ -199,6 +206,20 @@ class Database:
                 (user_id, page_size, offset),
             ).fetchall()
             return self._rows_to_history(rows), pages
+
+    def get_history_by_status(self, user_id: int, status: str, limit: int) -> list[HistoryItem]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, user_id, source_type, source_value, title, file_size, status, created_at
+                FROM history
+                WHERE user_id = ? AND status = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (user_id, status, limit),
+            ).fetchall()
+            return self._rows_to_history(rows)
 
     def get_history(self, user_id: int, limit: int) -> list[HistoryItem]:
         items, _ = self.get_history_page(user_id, 1, limit)
@@ -291,6 +312,7 @@ class Database:
                     (SELECT COUNT(*) FROM users) AS users,
                     (SELECT COUNT(*) FROM history) AS history_items,
                     (SELECT COUNT(*) FROM favorites) AS favorites,
+                    (SELECT COUNT(*) FROM history WHERE status = 'queued') AS queued,
                     (SELECT COUNT(*) FROM history WHERE status = 'done') AS completed,
                     (SELECT COUNT(*) FROM history WHERE status = 'failed') AS failed
                 """

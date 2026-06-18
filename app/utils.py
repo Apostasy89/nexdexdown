@@ -23,12 +23,25 @@ STATUS_LABELS = {
     'queued': 'в очереди',
     'done': 'готово',
     'failed': 'ошибка',
+    'cancelled': 'отменено',
 }
+TRAILING_URL_PUNCTUATION = ".,!?;:\"'"
+URL_WRAPPER_PAIRS = ((')', '('), (']', '['), ('}', '{'), ('>', '<'))
+
+
+def normalize_extracted_url(url: str) -> str:
+    normalized = url.rstrip(TRAILING_URL_PUNCTUATION)
+    for closing, opening in URL_WRAPPER_PAIRS:
+        while normalized.endswith(closing) and normalized.count(opening) < normalized.count(closing):
+            normalized = normalized[:-1]
+    return normalized
 
 
 def extract_url(text: str) -> Optional[str]:
     match = URL_RE.search(text.strip())
-    return match.group(0) if match else None
+    if not match:
+        return None
+    return normalize_extracted_url(match.group(0))
 
 
 def looks_like_direct_audio_url(url: str) -> bool:

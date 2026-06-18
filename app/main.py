@@ -17,7 +17,7 @@ from telegram.ext import (
 )
 
 from .config import Settings, load_settings
-from .db import Database
+from .db import Database, HistoryItem
 from .keyboards import main_menu, pager, result_actions
 from .logging_setup import setup_logging
 from .services import AudioMetadata, AudioPipeline, ProcessResult
@@ -27,7 +27,6 @@ from .utils import (
     html_escape,
     human_duration,
     human_size,
-    looks_like_direct_audio_url,
     present_status,
     safe_filename,
     source_title_from_url,
@@ -36,6 +35,7 @@ from .utils import (
 logger = logging.getLogger(__name__)
 PAGE_SIZE = 5
 SEARCH_LIMIT = 10
+QUEUE_PREVIEW_LIMIT = 5
 
 
 @dataclass
@@ -135,6 +135,24 @@ class BotApp:
             reply_markup=main_menu(),
         )
 
+    def cancel_pending_jobs(self, user_id: int) -> list[QueueJob]:
+        queue_store = self.queue._queue
+        removed: list[QueueJob] = []
+        retained: list[QueueJob] = []
+        for queued_job in list(queue_store):
+            if queued_job.user_id == user_id:
+                removed.append(queued_job)
+            else:
+                retained.append(queued_job)
+        if not removed:
+            return []
+        queue_store.clear()
+        queue_store.extend(retained)
+        for queued_job in removed:
+            self.db.update_history_status(queued_job.history_id, 'cancelled')
+            self.queue.task_done()
+        return removed
+
     async def enqueue_job(self, message: Message, job: QueueJob, accepted_text: str) -> None:
         status_message = await message.reply_text(f'{accepted_text}\n└ Позиция: {self.queue.qsize() + 1}')
         job.status_message_id = status_message.message_id
@@ -162,11 +180,11 @@ class BotApp:
             '<i>быстрый, чистый и надежный музыкальный utility-бот</i>\n\n'
             'Что внутри:\n'
             '• очередь задач без конфликтов\n'
-            '• импорт аудиофайлов и прямых ссылок\n'
-            '• автоматическая конвертация в MP3\n'
-            '• история, избранное, поиск и диагностика\n\n'
+            '• страницы треков, прямые аудиоссылки и загрузки файлов\n'
+            '• автоматическое извлечение аудио и конвертация в MP3\n'
+            '• история, избранное, очередь и диагностика\n\n'
             f'Текущий лимит файла: <b>{self.settings.max_file_mb} МБ</b>\n\n'
-            'Отправь ссылку на аудиофайл или загрузи трек в чат.'
+            'Отправь ссылку на трек, страницу с треком или загрузи аудиофайл в чат.'
         )
         if splash_path.exists():
             with splash_path.open('rb') as image_file:
@@ -185,16 +203,15 @@ class BotApp:
             return
         help_text = (
             '<b>Как работает NexDownSave</b>\n\n'
-            '1. Пришли прямую ссылку на аудиофайл: '
-            '<code>.mp3</code>, <code>.m4a</code>, <code>.wav</code>, <code>.ogg</code>, '
-            '<code>.flac</code>, <code>.aac</code>, <code>.opus</code>, <code>.wma</code>, <code>.aiff</code>\n'
+            '1. Пришли ссылку на страницу трека или прямую ссылку на аудиофайл\n'
             '2. Или загрузи свой аудиофайл или документ прямо в чат\n'
-            '3. Бот поставит задачу в очередь, проверит размер, аудиопоток и метаданные, затем конвертирует в MP3\n\n'
+            '3. Бот поставит задачу в очередь, попробует извлечь аудио, проверит поток и отправит MP3\n\n'
             'Дополнительно:\n'
+            '• <code>/queue</code> показывает твои ожидающие задачи\n'
             '• <code>/history</code> показывает историю с пагинацией\n'
             '• <code>/favorites</code> показывает избранное\n'
             '• <code>/search текст</code> ищет по истории и избранному\n'
-            '• <code>/status</code> показывает лимиты и загрузку очереди'
+            '• кнопка «Повторить» работает и для ссылок, и для загруженных файлов'
         )
         await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
 
@@ -226,6 +243,28 @@ class BotApp:
             return
         await update.message.reply_text(self.render_status(), parse_mode=ParseMode.HTML)
 
+    async def cmd_queue(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        del ctx
+        user = update.effective_user
+        if user is None or update.message is None:
+            return
+        await update.message.reply_text(self.render_queue_overview(user.id), parse_mode=ParseMode.HTML)
+
+    async def cmd_cancel(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        del ctx
+        user = update.effective_user
+        if user is None or update.message is None:
+            return
+        removed = self.cancel_pending_jobs(user.id)
+        if not removed:
+            await update.message.reply_text('◌ У тебя нет ожидающих задач для отмены.', reply_markup=main_menu())
+            return
+        await update.message.reply_text(
+            '◆ Очередь очищена\n'
+            f'└ Снято задач: {len(removed)}',
+            reply_markup=main_menu(),
+        )
+
     async def cmd_search(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
         if user is None or update.message is None:
@@ -254,9 +293,10 @@ class BotApp:
             f"Пользователей: <b>{summary['users']}</b>\n"
             f"Записей истории: <b>{summary['history_items']}</b>\n"
             f"Избранного: <b>{summary['favorites']}</b>\n"
+            f"Задач в ожидании: <b>{summary['queued']}</b>\n"
             f"Успешных задач: <b>{summary['completed']}</b>\n"
             f"Неудачных задач: <b>{summary['failed']}</b>\n"
-            f"Размер очереди: <b>{self.queue.qsize()}</b>",
+            f"Размер очереди в памяти: <b>{self.queue.qsize()}</b>",
             parse_mode=ParseMode.HTML,
         )
 
@@ -265,7 +305,7 @@ class BotApp:
         return (
             '<b>Статистика NexDownSave</b>\n\n'
             f"Запросов: <b>{stats.get('requests', 0)}</b>\n"
-            f"Прямых загрузок: <b>{stats.get('direct_downloads', 0)}</b>\n"
+            f"Обработано ссылок: <b>{stats.get('direct_downloads', 0)}</b>\n"
             f"Загруженных файлов: <b>{stats.get('uploaded_files', 0)}</b>\n"
             f"Добавлений в избранное: <b>{stats.get('favorites_added', 0)}</b>\n"
             f"Поисковых запросов: <b>{stats.get('search_requests', 0)}</b>\n"
@@ -324,6 +364,26 @@ class BotApp:
             f'• Интервал опроса очереди: <b>{self.settings.queue_poll_interval:.1f} сек</b>'
         )
 
+    def render_queue_overview(self, user_id: int) -> str:
+        queued_total = self.db.count_history_by_status(user_id, 'queued')
+        queued_items = self.db.get_history_by_status(user_id, 'queued', QUEUE_PREVIEW_LIMIT)
+        lines = [
+            '<b>Очередь NexDownSave</b>',
+            '',
+            f'Глобальная очередь: <b>{self.queue.qsize()}</b> из <b>{self.settings.queue_maxsize}</b>',
+            f'Твои ожидающие задачи: <b>{queued_total}</b>',
+            'Для очистки используй <code>/cancel</code> или кнопку ниже.',
+        ]
+        if queued_items:
+            lines.append('')
+            lines.append('<b>Последние ожидающие задачи</b>')
+            for item in queued_items:
+                lines.append(f"• {html_code(item.title)} | {html_escape(item.created_at)}")
+        else:
+            lines.append('')
+            lines.append('У тебя нет задач в ожидании.')
+        return '\n'.join(lines)
+
     def render_metadata_card(self, metadata: AudioMetadata | None, file_size: int) -> str:
         details = [f'Размер: {human_size(file_size)}']
         if metadata is not None:
@@ -344,6 +404,37 @@ class BotApp:
             lines.append(f'{connector} {detail}')
         return '\n'.join(lines)
 
+    def build_repeat_job(self, message: Message, user_id: int, target: HistoryItem) -> tuple[int, QueueJob, str] | None:
+        new_history_id = self.db.add_history(user_id, target.source_type, target.source_value, target.title, 0, 'queued')
+        if target.source_type == 'url':
+            return (
+                new_history_id,
+                QueueJob(
+                    user_id=user_id,
+                    chat_id=message.chat_id,
+                    history_id=new_history_id,
+                    source_type='url',
+                    source_value=target.source_value,
+                ),
+                f'◌ Повторно добавлено в очередь NexDownSave\n└ {target.title}',
+            )
+        if target.source_type == 'upload':
+            return (
+                new_history_id,
+                QueueJob(
+                    user_id=user_id,
+                    chat_id=message.chat_id,
+                    history_id=new_history_id,
+                    source_type='upload',
+                    source_value=target.source_value,
+                    file_id=target.source_value,
+                    file_name=target.title or f'upload_{target.id}',
+                ),
+                f'◌ Повторно добавлено в очередь NexDownSave\n└ {target.title}',
+            )
+        self.db.update_history_status(new_history_id, 'failed')
+        return None
+
     async def handle_text(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         del ctx
         message = update.message
@@ -355,13 +446,7 @@ class BotApp:
 
         url = extract_url(message.text or '')
         if not url:
-            await message.reply_text('◌ Пришли прямую аудиоссылку или загрузи файл.', reply_markup=main_menu())
-            return
-        if not looks_like_direct_audio_url(url):
-            await message.reply_text(
-                '◌ NexDownSave принимает только прямые ссылки на аудиофайлы. Пришли ссылку с аудиорасширением или загрузи файл.',
-                reply_markup=main_menu(),
-            )
+            await message.reply_text('◌ Пришли ссылку на трек, страницу с треком или загрузи файл.', reply_markup=main_menu())
             return
         if self.queue.full():
             await self.reply_queue_busy(message)
@@ -377,7 +462,7 @@ class BotApp:
                 source_type='url',
                 source_value=url,
             ),
-            '◌ Задача принята в очередь NexDownSave',
+            '◌ Ссылка принята в очередь NexDownSave',
         )
 
     async def handle_media(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -436,7 +521,7 @@ class BotApp:
                 await bot.send_chat_action(chat_id=job.chat_id, action=ChatAction.UPLOAD_DOCUMENT)
 
                 if job.source_type == 'url':
-                    result = await self.pipeline.download_direct_url(job.source_value)
+                    result = await self.pipeline.download_track_url(job.source_value)
                     if not result.ok or result.output_path is None or result.title is None:
                         await self.fail_job(bot, job, result.message)
                         return
@@ -523,8 +608,8 @@ class BotApp:
             return
         if data == 'menu:help':
             await message.reply_text(
-                'Пришли прямую ссылку на аудиофайл или загрузи аудио или документ. '
-                'NexDownSave поставит задачу в очередь, проверит аудиопоток и вернет MP3.'
+                'Пришли ссылку на страницу трека, прямую аудиоссылку или загрузи аудио/документ. '
+                'NexDownSave попробует извлечь аудио и вернет MP3.'
             )
             return
         if data == 'menu:stats':
@@ -534,6 +619,20 @@ class BotApp:
             await message.reply_text(
                 'Используй <code>/search название</code> для поиска по истории и избранному.',
                 parse_mode=ParseMode.HTML,
+            )
+            return
+        if data == 'menu:queue':
+            await message.reply_text(self.render_queue_overview(user.id), parse_mode=ParseMode.HTML)
+            return
+        if data == 'menu:cancel':
+            removed = self.cancel_pending_jobs(user.id)
+            if not removed:
+                await message.reply_text('◌ У тебя нет ожидающих задач для отмены.', reply_markup=main_menu())
+                return
+            await message.reply_text(
+                '◆ Очередь очищена\n'
+                f'└ Снято задач: {len(removed)}',
+                reply_markup=main_menu(),
             )
             return
         if data == 'menu:status':
@@ -576,24 +675,15 @@ class BotApp:
             if target is None:
                 await message.reply_text('◌ Запись истории не найдена.')
                 return
-            if target.source_type != 'url':
-                await message.reply_text('◌ Повтор доступен только для прямых ссылок.')
-                return
             if self.queue.full():
                 await self.reply_queue_busy(message)
                 return
-            new_history_id = self.db.add_history(user.id, 'url', target.source_value, target.title, 0, 'queued')
-            await self.enqueue_job(
-                message,
-                QueueJob(
-                    user_id=user.id,
-                    chat_id=message.chat_id,
-                    history_id=new_history_id,
-                    source_type='url',
-                    source_value=target.source_value,
-                ),
-                f'◌ Повторно добавлено в очередь NexDownSave\n└ {target.title}',
-            )
+            payload = self.build_repeat_job(message, user.id, target)
+            if payload is None:
+                await message.reply_text('◌ Повтор для этого типа задачи не поддерживается.')
+                return
+            _, job, accepted_text = payload
+            await self.enqueue_job(message, job, accepted_text)
 
     async def error_handler(self, update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         del update
@@ -637,6 +727,8 @@ def main() -> None:
     application.add_handler(CommandHandler('history', bot_app.cmd_history))
     application.add_handler(CommandHandler('favorites', bot_app.cmd_favorites))
     application.add_handler(CommandHandler('status', bot_app.cmd_status))
+    application.add_handler(CommandHandler('queue', bot_app.cmd_queue))
+    application.add_handler(CommandHandler('cancel', bot_app.cmd_cancel))
     application.add_handler(CommandHandler('search', bot_app.cmd_search))
     application.add_handler(CommandHandler('admin', bot_app.cmd_admin))
     application.add_handler(CallbackQueryHandler(bot_app.handle_callback))
