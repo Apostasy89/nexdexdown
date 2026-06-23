@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.0 - 2026-06-24
+
+- added search by track name: plain text is treated as a `yt-dlp` `ytsearch` query with numbered, selectable results
+- added inline mode (`@bot query`) serving cached tracks instantly and deep-linking new queries into the bot
+- added a `tracks` cache table that stores Telegram `file_id` for instant repeats and inline delivery without re-downloading
+- added a `search_cache` table with TTL pruning to back numbered result selection and inline deep links
+- routed link repeats through the cache for instant re-sends
+- added `SEARCH_TIMEOUT` and `SEARCH_RESULTS` settings
+- added unit tests for the track cache, search cache, and search-result handling
+- refreshed start, help, and stats UX to surface search and inline features
+
 ## 1.1.0 - 2026-06-17
 
 - switched bot text rendering to safe HTML to eliminate Markdown escaping bugs with user content

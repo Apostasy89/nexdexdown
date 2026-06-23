@@ -13,6 +13,9 @@ NexDownSave is a production-oriented Telegram bot for track links, public music 
 ## Highlights
 
 - Russian-first branded Telegram UX
+- **search by track name** — type a query, pick a numbered result, get MP3
+- **inline mode** — `@bot track name` works in any chat
+- **instant re-send from cache** — already processed tracks return immediately via Telegram `file_id`
 - safe HTML-formatted bot responses without Markdown escaping bugs
 - direct audio links and public track page links via `yt-dlp`
 - paginated history and favorites
@@ -85,6 +88,8 @@ Main variables:
 - `RETRY_ATTEMPTS`
 - `QUEUE_POLL_INTERVAL`
 - `QUEUE_MAXSIZE`
+- `SEARCH_TIMEOUT`
+- `SEARCH_RESULTS`
 
 ## Local management
 
@@ -211,13 +216,28 @@ Optional cron example:
 - `/status`
 - `/admin`
 
+## Search and inline mode
+
+- **Search by name:** send any non-link text. NexDownSave runs a `yt-dlp` `ytsearch`
+  query, shows numbered results, and downloads the one you pick.
+- **Inline mode:** type `@your_bot track name` in any chat. Already cached tracks are
+  returned instantly as audio; for new queries an article opens the bot via a deep link
+  and runs the search there.
+- **Enable inline in BotFather:** send `/setinline` to @BotFather, pick the bot, and set a
+  placeholder (for example `название трека...`). Inline replies will not appear until this
+  is enabled.
+- **Cache:** the first successful download of a track stores its Telegram `file_id` in the
+  `tracks` table, so repeats and inline hits are instant and skip re-downloading.
+
 ## Scope
 
 NexDownSave supports:
 
+- search by track name over public sources via `yt-dlp`
 - direct links to audio files
 - public pages with track audio supported by `yt-dlp`
 - audio files uploaded by the user
+- inline delivery of previously cached tracks
 
 It does not bypass DRM, private content, or unsupported media sources.
 

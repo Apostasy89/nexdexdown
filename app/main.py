@@ -1,10 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-from dataclasses import dataclass
+import uuid
+from dataclasses import asdict, dataclass
 
-from telegram import Bot, Message, Update
+from telegram import (
+    Bot,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InlineQueryResultArticle,
+    InlineQueryResultCachedAudio,
+    InputTextMessageContent,
+    Message,
+    Update,
+)
 from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import (
@@ -12,15 +23,16 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    InlineQueryHandler,
     MessageHandler,
     filters,
 )
 
 from .config import Settings, load_settings
 from .db import Database, HistoryItem
-from .keyboards import main_menu, pager, result_actions
+from .keyboards import main_menu, pager, result_actions, search_results
 from .logging_setup import setup_logging
-from .services import AudioMetadata, AudioPipeline, ProcessResult
+from .services import AudioMetadata, AudioPipeline, ProcessResult, SearchHit
 from .utils import (
     extract_url,
     html_code,
@@ -36,6 +48,9 @@ logger = logging.getLogger(__name__)
 PAGE_SIZE = 5
 SEARCH_LIMIT = 10
 QUEUE_PREVIEW_LIMIT = 5
+INLINE_CACHE_LIMIT = 20
+SEARCH_CACHE_TTL_SECONDS = 86_400
+DEEPLINK_QUERY_PREFIX = 'q'
 
 
 @dataclass
@@ -59,6 +74,11 @@ class BotApp:
         self.user_locks: dict[int, asyncio.Lock] = {}
         self.queue: asyncio.Queue[QueueJob] = asyncio.Queue(maxsize=settings.queue_maxsize)
         self.worker_task: asyncio.Task | None = None
+        self.bot_username: str | None = None
+
+    @staticmethod
+    def new_token() -> str:
+        return uuid.uuid4().hex[:12]
 
     def get_lock(self, user_id: int) -> asyncio.Lock:
         if user_id not in self.user_locks:
@@ -167,24 +187,28 @@ class BotApp:
             )
 
     async def cmd_start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        del ctx
         user = update.effective_user
         message = update.message
         if message is None:
             return
         if user:
             self.db.upsert_user(user.id, user.first_name, user.username)
+        if await self.handle_start_deeplink(message, ctx):
+            return
         splash_path = self.brand_dir / 'start-splash.png'
+        inline_hint = f'@{self.bot_username} трек' if self.bot_username else '@бот трек'
         caption = (
             '<b>NexDownSave</b>\n'
             '<i>быстрый, чистый и надежный музыкальный utility-бот</i>\n\n'
             'Что внутри:\n'
+            '• <b>поиск по названию</b> — просто напиши, что ищешь\n'
+            f'• <b>inline-режим</b> — <code>{html_escape(inline_hint)}</code> в любом чате\n'
             '• очередь задач без конфликтов\n'
             '• страницы треков, прямые аудиоссылки и загрузки файлов\n'
-            '• автоматическое извлечение аудио и конвертация в MP3\n'
+            '• мгновенная повторная отправка из кеша\n'
             '• история, избранное, очередь и диагностика\n\n'
             f'Текущий лимит файла: <b>{self.settings.max_file_mb} МБ</b>\n\n'
-            'Отправь ссылку на трек, страницу с треком или загрузи аудиофайл в чат.'
+            'Напиши название трека, пришли ссылку или загрузи аудиофайл в чат.'
         )
         if splash_path.exists():
             with splash_path.open('rb') as image_file:
@@ -197,15 +221,38 @@ class BotApp:
             return
         await message.reply_text(caption, parse_mode=ParseMode.HTML, reply_markup=main_menu())
 
+    async def handle_start_deeplink(self, message: Message, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
+        args = getattr(ctx, 'args', None) or []
+        if not args:
+            return False
+        payload = args[0]
+        if not payload.startswith(DEEPLINK_QUERY_PREFIX):
+            return False
+        token = payload[len(DEEPLINK_QUERY_PREFIX):]
+        cached = self.db.get_search_cache(token)
+        if cached is None:
+            return False
+        try:
+            data = json.loads(cached)
+        except json.JSONDecodeError:
+            return False
+        query = data.get('q') if isinstance(data, dict) else None
+        if not query:
+            return False
+        await self.deliver_search(message, query)
+        return True
+
     async def cmd_help(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         del ctx
         if update.message is None:
             return
         help_text = (
             '<b>Как работает NexDownSave</b>\n\n'
-            '1. Пришли ссылку на страницу трека или прямую ссылку на аудиофайл\n'
-            '2. Или загрузи свой аудиофайл или документ прямо в чат\n'
-            '3. Бот поставит задачу в очередь, попробует извлечь аудио, проверит поток и отправит MP3\n\n'
+            '1. Напиши <b>название трека</b> — бот покажет варианты, выбери номер\n'
+            '2. Или пришли ссылку / прямую ссылку на аудиофайл\n'
+            '3. Или загрузи свой аудиофайл или документ прямо в чат\n'
+            '4. Бот поставит задачу в очередь, извлечёт аудио и отправит MP3\n\n'
+            'В любом чате работает <b>inline-режим</b>: набери имя бота и название трека.\n\n'
             'Дополнительно:\n'
             '• <code>/queue</code> показывает твои ожидающие задачи\n'
             '• <code>/history</code> показывает историю с пагинацией\n'
@@ -309,6 +356,7 @@ class BotApp:
             f"Загруженных файлов: <b>{stats.get('uploaded_files', 0)}</b>\n"
             f"Добавлений в избранное: <b>{stats.get('favorites_added', 0)}</b>\n"
             f"Поисковых запросов: <b>{stats.get('search_requests', 0)}</b>\n"
+            f"Inline-запросов: <b>{stats.get('inline_requests', 0)}</b>\n"
             f"Ошибок: <b>{stats.get('errors', 0)}</b>\n"
             f"Пользователей: <b>{stats.get('users', 0)}</b>\n"
             f"Записей истории: <b>{stats.get('history', 0)}</b>\n"
@@ -444,26 +492,110 @@ class BotApp:
         self.db.upsert_user(user.id, user.first_name, user.username)
         self.db.increment_stat('requests')
 
-        url = extract_url(message.text or '')
-        if not url:
-            await message.reply_text('◌ Пришли ссылку на трек, страницу с треком или загрузи файл.', reply_markup=main_menu())
+        text = (message.text or '').strip()
+        url = extract_url(text)
+        if url:
+            await self.submit_url(
+                message,
+                user.id,
+                url,
+                source_title_from_url(url),
+                '◌ Ссылка принята в очередь NexDownSave',
+            )
+            return
+
+        if not text:
+            await message.reply_text(
+                '◌ Пришли ссылку на трек, название для поиска или загрузи файл.',
+                reply_markup=main_menu(),
+            )
+            return
+        await self.deliver_search(message, text)
+
+    async def submit_url(
+        self,
+        message: Message,
+        user_id: int,
+        url: str,
+        title: str,
+        accepted_text: str,
+    ) -> None:
+        if await self.try_send_cached(message.get_bot(), message.chat_id, user_id, url):
             return
         if self.queue.full():
             await self.reply_queue_busy(message)
             return
-
-        history_id = self.db.add_history(user.id, 'url', url, source_title_from_url(url), 0, 'queued')
+        history_id = self.db.add_history(user_id, 'url', url, title, 0, 'queued')
         await self.enqueue_job(
             message,
             QueueJob(
-                user_id=user.id,
+                user_id=user_id,
                 chat_id=message.chat_id,
                 history_id=history_id,
                 source_type='url',
                 source_value=url,
             ),
-            '◌ Ссылка принята в очередь NexDownSave',
+            accepted_text,
         )
+
+    async def try_send_cached(self, bot: Bot, chat_id: int, user_id: int, url: str) -> bool:
+        track = self.db.get_track(url)
+        if track is None:
+            return False
+        history_id = self.db.add_history(user_id, 'url', url, track.title, 0, 'done')
+        try:
+            await bot.send_audio(
+                chat_id=chat_id,
+                audio=track.tg_file_id,
+                title=track.title,
+                performer=track.performer,
+                caption='◆ NexDownSave\n└ Мгновенно из кеша',
+                reply_markup=result_actions(history_id),
+            )
+        except (BadRequest, Forbidden, TelegramError) as exc:
+            logger.warning('Cached send failed for %s: %s', url, exc)
+            self.db.update_history_status(history_id, 'failed')
+            return False
+        self.db.update_history_status(history_id, 'done', file_size=0, title=track.title)
+        self.db.increment_stat('direct_downloads')
+        return True
+
+    async def deliver_search(self, message: Message, query: str) -> None:
+        self.db.increment_stat('search_requests')
+        await message.get_bot().send_chat_action(chat_id=message.chat_id, action=ChatAction.TYPING)
+        hits = await self.pipeline.search_tracks(query, self.settings.search_results)
+        if not hits:
+            await message.reply_text(
+                f'◌ По запросу {html_code(query)} ничего не найдено.\n'
+                '└ Уточни название или пришли прямую ссылку.',
+                parse_mode=ParseMode.HTML,
+                reply_markup=main_menu(),
+            )
+            return
+        token = self.new_token()
+        self.db.prune_search_cache(SEARCH_CACHE_TTL_SECONDS)
+        self.db.save_search_cache(token, json.dumps([asdict(hit) for hit in hits]))
+        await message.reply_text(
+            self.render_search_results(query, hits),
+            parse_mode=ParseMode.HTML,
+            reply_markup=search_results(token, len(hits)),
+        )
+
+    def render_search_results(self, query: str, hits: list[SearchHit]) -> str:
+        lines = [f'<b>Результаты поиска:</b> {html_code(query)}', '']
+        for index, hit in enumerate(hits, start=1):
+            meta_parts = []
+            if hit.uploader:
+                meta_parts.append(hit.uploader)
+            duration = human_duration(hit.duration_seconds)
+            if duration:
+                meta_parts.append(duration)
+            lines.append(f'<b>{index}.</b> {html_escape(hit.title)}')
+            if meta_parts:
+                lines.append(f'   <i>{html_escape(" · ".join(meta_parts))}</i>')
+        lines.append('')
+        lines.append('Нажми номер трека, чтобы скачать.')
+        return '\n'.join(lines)
 
     async def handle_media(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         del ctx
@@ -564,9 +696,10 @@ class BotApp:
             job,
             f'◌ NexDownSave отправляет результат\n└ Размер: {human_size(result.file_size)}',
         )
+        sent_message: Message | None = None
         try:
             with result.output_path.open('rb') as audio_file:
-                await bot.send_audio(
+                sent_message = await bot.send_audio(
                     chat_id=job.chat_id,
                     audio=audio_file,
                     filename=result.output_path.name,
@@ -579,7 +712,30 @@ class BotApp:
             if result.output_path.parent.exists():
                 self.pipeline.cleanup_job_dir(result.output_path.parent)
         self.db.update_history_status(job.history_id, 'done', file_size=result.file_size, title=result.title)
+        self.cache_sent_track(job, result, performer, sent_message)
         await self.safe_delete_status_message(bot, job)
+
+    def cache_sent_track(
+        self,
+        job: QueueJob,
+        result: ProcessResult,
+        performer: str | None,
+        sent_message: Message | None,
+    ) -> None:
+        if job.source_type != 'url' or sent_message is None or sent_message.audio is None:
+            return
+        if result.title is None:
+            return
+        duration = None
+        if result.metadata and result.metadata.duration_seconds is not None:
+            duration = int(result.metadata.duration_seconds)
+        self.db.upsert_track(
+            job.source_value,
+            result.title,
+            performer,
+            duration,
+            sent_message.audio.file_id,
+        )
 
     @staticmethod
     def parse_callback_int(data: str, prefix: str) -> int | None:
@@ -675,6 +831,15 @@ class BotApp:
             if target is None:
                 await message.reply_text('◌ Запись истории не найдена.')
                 return
+            if target.source_type == 'url':
+                await self.submit_url(
+                    message,
+                    user.id,
+                    target.source_value,
+                    target.title,
+                    f'◌ Повторно добавлено в очередь NexDownSave\n└ {target.title}',
+                )
+                return
             if self.queue.full():
                 await self.reply_queue_busy(message)
                 return
@@ -684,6 +849,98 @@ class BotApp:
                 return
             _, job, accepted_text = payload
             await self.enqueue_job(message, job, accepted_text)
+            return
+        if data.startswith('dl:'):
+            await self.handle_download_choice(message, user.id, data)
+            return
+
+    async def handle_download_choice(self, message: Message, user_id: int, data: str) -> None:
+        parts = data.split(':', 2)
+        if len(parts) != 3:
+            return
+        _, token, raw_index = parts
+        hit = self.lookup_search_hit(token, raw_index)
+        if hit is None:
+            await message.reply_text(
+                '◌ Результаты поиска устарели.\n└ Повтори поиск и выбери трек заново.',
+                reply_markup=main_menu(),
+            )
+            return
+        await self.submit_url(
+            message,
+            user_id,
+            hit.url,
+            hit.title,
+            f'◌ Трек принят в очередь NexDownSave\n└ {hit.title}',
+        )
+
+    def lookup_search_hit(self, token: str, raw_index: str) -> SearchHit | None:
+        try:
+            index = int(raw_index)
+        except ValueError:
+            return None
+        payload = self.db.get_search_cache(token)
+        if payload is None:
+            return None
+        try:
+            entries = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(entries, list) or not 0 <= index < len(entries):
+            return None
+        try:
+            return SearchHit(**entries[index])
+        except (TypeError, ValueError):
+            return None
+
+    async def handle_inline(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        del ctx
+        inline_query = update.inline_query
+        if inline_query is None:
+            return
+        query = (inline_query.query or '').strip()
+        self.db.increment_stat('inline_requests')
+        results: list[object] = []
+        if not query:
+            results.append(
+                InlineQueryResultArticle(
+                    id=self.new_token(),
+                    title='Введите название трека',
+                    description='NexDownSave найдёт и отправит музыку',
+                    input_message_content=InputTextMessageContent(
+                        '🔎 Поиск музыки через @{bot}'.format(bot=self.bot_username or 'NexDownSave')
+                    ),
+                )
+            )
+            await inline_query.answer(results, cache_time=5, is_personal=True)
+            return
+
+        for track in self.db.search_cached_tracks(query, INLINE_CACHE_LIMIT):
+            results.append(
+                InlineQueryResultCachedAudio(
+                    id=self.new_token(),
+                    audio_file_id=track.tg_file_id,
+                    caption='◆ NexDownSave',
+                )
+            )
+        results.append(self.build_search_deeplink_result(query))
+        await inline_query.answer(results, cache_time=10, is_personal=True)
+
+    def build_search_deeplink_result(self, query: str) -> InlineQueryResultArticle:
+        token = self.new_token()
+        self.db.prune_search_cache(SEARCH_CACHE_TTL_SECONDS)
+        self.db.save_search_cache(token, json.dumps({'q': query}))
+        bot_name = self.bot_username or 'NexDownSave'
+        deeplink = f'https://t.me/{bot_name}?start={DEEPLINK_QUERY_PREFIX}{token}'
+        return InlineQueryResultArticle(
+            id=self.new_token(),
+            title=f'🔎 Найти «{query}» в NexDownSave',
+            description='Открыть бота и скачать трек в MP3',
+            input_message_content=InputTextMessageContent(f'🔎 Поиск трека: {query}'),
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton('Открыть NexDownSave', url=deeplink)]]
+            ),
+        )
 
     async def error_handler(self, update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         del update
@@ -692,6 +949,11 @@ class BotApp:
 
 async def on_post_init(application: Application) -> None:
     bot_app: BotApp = application.bot_data['bot_app']
+    try:
+        me = await application.bot.get_me()
+        bot_app.bot_username = me.username
+    except TelegramError as exc:
+        logger.warning('Could not resolve bot username: %s', exc)
     await bot_app.start_worker(application)
 
 
@@ -732,6 +994,7 @@ def main() -> None:
     application.add_handler(CommandHandler('search', bot_app.cmd_search))
     application.add_handler(CommandHandler('admin', bot_app.cmd_admin))
     application.add_handler(CallbackQueryHandler(bot_app.handle_callback))
+    application.add_handler(InlineQueryHandler(bot_app.handle_inline))
     application.add_handler(MessageHandler(filters.AUDIO | filters.Document.ALL, bot_app.handle_media))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot_app.handle_text))
     application.add_error_handler(bot_app.error_handler)
