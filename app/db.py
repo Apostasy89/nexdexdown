@@ -29,6 +29,15 @@ class FavoriteItem:
     created_at: str
 
 
+@dataclass
+class CachedTrack:
+    source_value: str
+    title: str
+    performer: str | None
+    duration: int | None
+    tg_file_id: str
+
+
 class Database:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -87,10 +96,28 @@ class Database:
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 );
 
+                CREATE TABLE IF NOT EXISTS tracks (
+                    source_value TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    performer TEXT,
+                    duration INTEGER,
+                    tg_file_id TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS search_cache (
+                    token TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_history_user_id ON history(user_id, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_history_user_status ON history(user_id, status, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_favorites_user_id ON favorites(user_id, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_favorites_user_source ON favorites(user_id, source_value);
+                CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title);
+                CREATE INDEX IF NOT EXISTS idx_search_cache_created ON search_cache(created_at);
                 """
             )
             for key in (
@@ -100,6 +127,7 @@ class Database:
                 'errors',
                 'favorites_added',
                 'search_requests',
+                'inline_requests',
             ):
                 conn.execute('INSERT OR IGNORE INTO stats(key, value) VALUES(?, 0)', (key,))
 
@@ -303,6 +331,80 @@ class Database:
                 (user_id, pattern, pattern, limit),
             ).fetchall()
             return self._rows_to_favorites(rows)
+
+    def upsert_track(
+        self,
+        source_value: str,
+        title: str,
+        performer: str | None,
+        duration: int | None,
+        tg_file_id: str,
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO tracks(source_value, title, performer, duration, tg_file_id)
+                VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(source_value) DO UPDATE SET
+                    title=excluded.title,
+                    performer=excluded.performer,
+                    duration=excluded.duration,
+                    tg_file_id=excluded.tg_file_id,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (source_value, title, performer, duration, tg_file_id),
+            )
+
+    def get_track(self, source_value: str) -> CachedTrack | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT source_value, title, performer, duration, tg_file_id
+                FROM tracks
+                WHERE source_value = ?
+                LIMIT 1
+                """,
+                (source_value,),
+            ).fetchone()
+            return CachedTrack(**dict(row)) if row else None
+
+    def search_cached_tracks(self, query: str, limit: int) -> list[CachedTrack]:
+        pattern = f"%{query.strip()}%"
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT source_value, title, performer, duration, tg_file_id
+                FROM tracks
+                WHERE title LIKE ? OR performer LIKE ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (pattern, pattern, limit),
+            ).fetchall()
+            return [CachedTrack(**dict(row)) for row in rows]
+
+    def save_search_cache(self, token: str, payload: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                'INSERT OR REPLACE INTO search_cache(token, payload) VALUES(?, ?)',
+                (token, payload),
+            )
+
+    def get_search_cache(self, token: str) -> str | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                'SELECT payload FROM search_cache WHERE token = ? LIMIT 1',
+                (token,),
+            ).fetchone()
+            return row['payload'] if row else None
+
+    def prune_search_cache(self, max_age_seconds: int) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "DELETE FROM search_cache "
+                "WHERE created_at <= datetime('now', ?)",
+                (f'-{max(0, max_age_seconds)} seconds',),
+            )
 
     def get_global_summary(self) -> dict[str, int]:
         with self.connect() as conn:

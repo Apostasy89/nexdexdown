@@ -22,6 +22,8 @@ class Settings:
     retry_attempts: int
     queue_poll_interval: float
     queue_maxsize: int
+    search_timeout: int
+    search_results: int
 
     def ensure_runtime_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -92,6 +94,8 @@ def load_settings(base_dir: Path | None = None) -> Settings:
     retry_attempts = _parse_int('RETRY_ATTEMPTS', '2', minimum=0)
     history_limit = _parse_int('HISTORY_LIMIT', '100', minimum=1)
     queue_maxsize = _parse_int('QUEUE_MAXSIZE', '100', minimum=1)
+    search_timeout = _parse_int('SEARCH_TIMEOUT', '30', minimum=1)
+    search_results = _parse_int('SEARCH_RESULTS', '6', minimum=1)
 
     settings = Settings(
         bot_token=os.getenv('BOT_TOKEN', '').strip(),
@@ -109,6 +113,8 @@ def load_settings(base_dir: Path | None = None) -> Settings:
         retry_attempts=retry_attempts,
         queue_poll_interval=_parse_float('QUEUE_POLL_INTERVAL', '0.2', minimum=0.0),
         queue_maxsize=queue_maxsize,
+        search_timeout=search_timeout,
+        search_results=search_results,
     )
     settings.ensure_runtime_dirs()
     return settings

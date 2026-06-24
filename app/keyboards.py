@@ -38,6 +38,20 @@ def result_actions(history_id: int) -> InlineKeyboardMarkup:
     )
 
 
+def search_results(token: str, count: int) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for index in range(count):
+        row.append(InlineKeyboardButton(str(index + 1), callback_data=f'dl:{token}:{index}'))
+        if len(row) == 5:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton('Отмена', callback_data='menu:main')])
+    return InlineKeyboardMarkup(rows)
+
+
 def pager(kind: str, page: int, pages: int) -> InlineKeyboardMarkup:
     buttons = []
     row = []

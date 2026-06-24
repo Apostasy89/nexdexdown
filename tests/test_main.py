@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from app.config import Settings
 from app.main import BotApp, QueueJob
+from app.services import SearchHit
 
 
 class BotAppQueueTests(unittest.TestCase):
@@ -31,6 +33,8 @@ class BotAppQueueTests(unittest.TestCase):
             retry_attempts=1,
             queue_poll_interval=0.1,
             queue_maxsize=10,
+            search_timeout=30,
+            search_results=6,
         )
         self.settings.ensure_runtime_dirs()
         self.bot_app = BotApp(self.settings)
@@ -66,6 +70,42 @@ class BotAppQueueTests(unittest.TestCase):
         self.assertEqual(first.status, 'cancelled')
         self.assertEqual(second.status, 'cancelled')
         self.assertEqual(third.status, 'queued')
+
+    def test_lookup_search_hit_roundtrip(self) -> None:
+        hits = [
+            SearchHit(video_id='a', title='First', url='https://yt/a', uploader='Chan', duration_seconds=120.0),
+            SearchHit(video_id='b', title='Second', url='https://yt/b'),
+        ]
+        token = self.bot_app.new_token()
+        self.bot_app.db.save_search_cache(token, json.dumps([hit.__dict__ for hit in hits]))
+
+        first = self.bot_app.lookup_search_hit(token, '0')
+        self.assertIsNotNone(first)
+        assert first is not None
+        self.assertEqual(first.title, 'First')
+        self.assertEqual(first.url, 'https://yt/a')
+
+        second = self.bot_app.lookup_search_hit(token, '1')
+        assert second is not None
+        self.assertEqual(second.video_id, 'b')
+
+    def test_lookup_search_hit_invalid_inputs(self) -> None:
+        self.assertIsNone(self.bot_app.lookup_search_hit('missing', '0'))
+        token = self.bot_app.new_token()
+        self.bot_app.db.save_search_cache(token, json.dumps([{'video_id': 'a', 'title': 't', 'url': 'u'}]))
+        self.assertIsNone(self.bot_app.lookup_search_hit(token, '9'))
+        self.assertIsNone(self.bot_app.lookup_search_hit(token, 'not-int'))
+
+    def test_render_search_results_lists_tracks(self) -> None:
+        hits = [
+            SearchHit(video_id='a', title='Alpha', url='u1', uploader='Band', duration_seconds=65.0),
+            SearchHit(video_id='b', title='Beta', url='u2'),
+        ]
+        rendered = self.bot_app.render_search_results('query', hits)
+        self.assertIn('Alpha', rendered)
+        self.assertIn('Beta', rendered)
+        self.assertIn('1:05', rendered)
+        self.assertIn('Band', rendered)
 
 
 if __name__ == '__main__':

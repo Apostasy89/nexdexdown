@@ -49,6 +49,15 @@ class ProcessResult:
     metadata: AudioMetadata | None = None
 
 
+@dataclass
+class SearchHit:
+    video_id: str
+    title: str
+    url: str
+    uploader: str | None = None
+    duration_seconds: float | None = None
+
+
 class AudioPipeline:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -182,6 +191,66 @@ class AudioPipeline:
         if not result.ok:
             self.cleanup_job_dir(job_dir)
         return result
+
+    async def search_tracks(self, query: str, limit: int) -> list[SearchHit]:
+        cleaned = query.replace('"', ' ').replace('\n', ' ').strip()
+        if not cleaned:
+            return []
+        limit = max(1, min(limit, 25))
+        code, stdout, err = await self.run_command(
+            sys.executable,
+            '-m',
+            'yt_dlp',
+            f'ytsearch{limit}:{cleaned}',
+            '--flat-playlist',
+            '--dump-single-json',
+            '--no-warnings',
+            '--no-progress',
+            timeout=self.settings.search_timeout,
+        )
+        if code != 0:
+            logger.warning('yt-dlp search failed for %r: %s', cleaned, err)
+            return []
+        try:
+            payload = json.loads(stdout)
+        except json.JSONDecodeError:
+            logger.warning('yt-dlp search returned invalid JSON for %r', cleaned)
+            return []
+        hits: list[SearchHit] = []
+        for entry in payload.get('entries', []) or []:
+            if not isinstance(entry, dict):
+                continue
+            hit = self._entry_to_hit(entry)
+            if hit is not None:
+                hits.append(hit)
+        return hits
+
+    @staticmethod
+    def _entry_to_hit(entry: dict) -> SearchHit | None:
+        video_id = entry.get('id')
+        if not video_id:
+            return None
+        title = (entry.get('title') or '').strip() or 'Без названия'
+        raw_url = entry.get('url') or ''
+        if raw_url.startswith('http'):
+            url = raw_url
+        else:
+            url = f'https://www.youtube.com/watch?v={video_id}'
+        duration_raw = entry.get('duration')
+        duration_seconds = None
+        if duration_raw is not None:
+            try:
+                duration_seconds = float(duration_raw)
+            except (TypeError, ValueError):
+                duration_seconds = None
+        uploader = entry.get('uploader') or entry.get('channel') or None
+        return SearchHit(
+            video_id=str(video_id),
+            title=title,
+            url=url,
+            uploader=uploader,
+            duration_seconds=duration_seconds,
+        )
 
     async def prepare_uploaded_file(self, source_path: Path) -> ProcessResult:
         if not source_path.exists():
