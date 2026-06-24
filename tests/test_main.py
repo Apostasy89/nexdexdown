@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import unittest
@@ -35,6 +36,10 @@ class BotAppQueueTests(unittest.TestCase):
             queue_maxsize=10,
             search_timeout=30,
             search_results=6,
+            anthropic_api_key='',
+            ai_model='claude-haiku-4-5',
+            vibe_queries=5,
+            vibe_results=8,
         )
         self.settings.ensure_runtime_dirs()
         self.bot_app = BotApp(self.settings)
@@ -95,6 +100,31 @@ class BotAppQueueTests(unittest.TestCase):
         self.bot_app.db.save_search_cache(token, json.dumps([{'video_id': 'a', 'title': 't', 'url': 'u'}]))
         self.assertIsNone(self.bot_app.lookup_search_hit(token, '9'))
         self.assertIsNone(self.bot_app.lookup_search_hit(token, 'not-int'))
+
+    def test_aggregate_vibe_hits_interleaves_and_dedupes(self) -> None:
+        results = {
+            'q1': [
+                SearchHit(video_id='a', title='A', url='ua'),
+                SearchHit(video_id='b', title='B', url='ub'),
+                SearchHit(video_id='shared', title='Shared', url='us'),
+            ],
+            'q2': [
+                SearchHit(video_id='shared', title='Shared', url='us'),
+                SearchHit(video_id='c', title='C', url='uc'),
+                SearchHit(video_id='d', title='D', url='ud'),
+            ],
+        }
+
+        async def fake_search(query: str, limit: int):
+            return results.get(query, [])
+
+        self.bot_app.pipeline.search_tracks = fake_search
+        hits = asyncio.run(self.bot_app.aggregate_vibe_hits(['q1', 'q2']))
+
+        ids = [hit.video_id for hit in hits]
+        self.assertEqual(ids.count('shared'), 1)  # deduped across queries
+        self.assertEqual(set(ids), {'a', 'b', 'c', 'd', 'shared'})
+        self.assertEqual(ids[:2], ['a', 'shared'])  # round-robin interleave
 
     def test_render_search_results_lists_tracks(self) -> None:
         hits = [

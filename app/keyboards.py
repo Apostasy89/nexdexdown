@@ -11,6 +11,9 @@ def main_menu() -> InlineKeyboardMarkup:
                 InlineKeyboardButton('Статистика', callback_data='menu:stats'),
             ],
             [
+                InlineKeyboardButton('Подбор по вайбу', callback_data='menu:vibe'),
+            ],
+            [
                 InlineKeyboardButton('История', callback_data='history:1'),
                 InlineKeyboardButton('Избранное', callback_data='favorites:1'),
             ],
