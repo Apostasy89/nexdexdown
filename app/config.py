@@ -24,6 +24,10 @@ class Settings:
     queue_maxsize: int
     search_timeout: int
     search_results: int
+    anthropic_api_key: str
+    ai_model: str
+    vibe_queries: int
+    vibe_results: int
 
     def ensure_runtime_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -96,6 +100,8 @@ def load_settings(base_dir: Path | None = None) -> Settings:
     queue_maxsize = _parse_int('QUEUE_MAXSIZE', '100', minimum=1)
     search_timeout = _parse_int('SEARCH_TIMEOUT', '30', minimum=1)
     search_results = _parse_int('SEARCH_RESULTS', '6', minimum=1)
+    vibe_queries = _parse_int('VIBE_QUERIES', '5', minimum=1)
+    vibe_results = _parse_int('VIBE_RESULTS', '8', minimum=1)
 
     settings = Settings(
         bot_token=os.getenv('BOT_TOKEN', '').strip(),
@@ -115,6 +121,10 @@ def load_settings(base_dir: Path | None = None) -> Settings:
         queue_maxsize=queue_maxsize,
         search_timeout=search_timeout,
         search_results=search_results,
+        anthropic_api_key=os.getenv('ANTHROPIC_API_KEY', '').strip(),
+        ai_model=os.getenv('AI_MODEL', 'claude-haiku-4-5').strip(),
+        vibe_queries=vibe_queries,
+        vibe_results=vibe_results,
     )
     settings.ensure_runtime_dirs()
     return settings

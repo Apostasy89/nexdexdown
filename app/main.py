@@ -33,6 +33,7 @@ from .db import Database, HistoryItem
 from .keyboards import main_menu, pager, result_actions, search_results
 from .logging_setup import setup_logging
 from .services import AudioMetadata, AudioPipeline, ProcessResult, SearchHit
+from .vibe import VibeInterpreter
 from .utils import (
     extract_url,
     html_code,
@@ -75,6 +76,7 @@ class BotApp:
         self.queue: asyncio.Queue[QueueJob] = asyncio.Queue(maxsize=settings.queue_maxsize)
         self.worker_task: asyncio.Task | None = None
         self.bot_username: str | None = None
+        self.vibe = VibeInterpreter(settings)
 
     @staticmethod
     def new_token() -> str:
@@ -202,6 +204,7 @@ class BotApp:
             '<i>быстрый, чистый и надежный музыкальный utility-бот</i>\n\n'
             'Что внутри:\n'
             '• <b>поиск по названию</b> — просто напиши, что ищешь\n'
+            '• <b>подбор по вайбу</b> — <code>/vibe дождливая ночь, инструментал</code>\n'
             f'• <b>inline-режим</b> — <code>{html_escape(inline_hint)}</code> в любом чате\n'
             '• очередь задач без конфликтов\n'
             '• страницы треков, прямые аудиоссылки и загрузки файлов\n'
@@ -253,6 +256,8 @@ class BotApp:
             '3. Или загрузи свой аудиофайл или документ прямо в чат\n'
             '4. Бот поставит задачу в очередь, извлечёт аудио и отправит MP3\n\n'
             'В любом чате работает <b>inline-режим</b>: набери имя бота и название трека.\n\n'
+            'Подбор по настроению: <code>/vibe дождливая ночь, инструментал</code> — '
+            'бот поймёт вайб и соберёт подборку (с учётом твоей истории).\n\n'
             'Дополнительно:\n'
             '• <code>/queue</code> показывает твои ожидающие задачи\n'
             '• <code>/history</code> показывает историю с пагинацией\n'
@@ -357,6 +362,7 @@ class BotApp:
             f"Добавлений в избранное: <b>{stats.get('favorites_added', 0)}</b>\n"
             f"Поисковых запросов: <b>{stats.get('search_requests', 0)}</b>\n"
             f"Inline-запросов: <b>{stats.get('inline_requests', 0)}</b>\n"
+            f"Подборок по вайбу: <b>{stats.get('vibe_requests', 0)}</b>\n"
             f"Ошибок: <b>{stats.get('errors', 0)}</b>\n"
             f"Пользователей: <b>{stats.get('users', 0)}</b>\n"
             f"Записей истории: <b>{stats.get('history', 0)}</b>\n"
@@ -597,6 +603,96 @@ class BotApp:
         lines.append('Нажми номер трека, чтобы скачать.')
         return '\n'.join(lines)
 
+    async def cmd_vibe(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        user = update.effective_user
+        if user is None or update.message is None:
+            return
+        self.db.upsert_user(user.id, user.first_name, user.username)
+        query = ' '.join(ctx.args).strip()
+        await self.deliver_vibe(update.message, user.id, query)
+
+    async def deliver_vibe(self, message: Message, user_id: int, query: str) -> None:
+        taste = self.db.get_taste_profile(user_id, 8)
+        if not query and not taste:
+            await message.reply_text(
+                '◌ Опиши настроение или вайб после команды, например:\n'
+                '<code>/vibe дождливая ночь, инструментал, ~90 BPM</code>\n'
+                'Когда у тебя появится история — смогу подбирать и под твой вкус.',
+                parse_mode=ParseMode.HTML,
+                reply_markup=main_menu(),
+            )
+            return
+        self.db.increment_stat('vibe_requests')
+        await message.get_bot().send_chat_action(chat_id=message.chat_id, action=ChatAction.TYPING)
+        vibe = await self.vibe.interpret(query, taste)
+        hits = await self.aggregate_vibe_hits(vibe.queries)
+        if not hits:
+            await message.reply_text(
+                f'◌ Не удалось собрать подборку под {html_code(query or "твой вкус")}.\n'
+                '└ Попробуй описать вайб другими словами.',
+                parse_mode=ParseMode.HTML,
+                reply_markup=main_menu(),
+            )
+            return
+        token = self.new_token()
+        self.db.prune_search_cache(SEARCH_CACHE_TTL_SECONDS)
+        self.db.save_search_cache(token, json.dumps([asdict(hit) for hit in hits]))
+        await message.reply_text(
+            self.render_vibe_results(vibe.interpretation, hits),
+            parse_mode=ParseMode.HTML,
+            reply_markup=search_results(token, len(hits)),
+        )
+
+    async def aggregate_vibe_hits(self, queries: list[SearchHit] | list[str]) -> list[SearchHit]:
+        if not queries:
+            return []
+        per_query = max(2, (self.settings.vibe_results // len(queries)) + 2)
+        searches = await asyncio.gather(
+            *(self.pipeline.search_tracks(query, per_query) for query in queries),
+            return_exceptions=True,
+        )
+        result_lists: list[list[SearchHit]] = []
+        for outcome in searches:
+            if isinstance(outcome, Exception):
+                logger.warning('Vibe sub-search failed: %s', outcome)
+                continue
+            result_lists.append(outcome)
+        # Round-robin interleave so the podborka stays diverse across queries.
+        merged: list[SearchHit] = []
+        seen: set[str] = set()
+        position = 0
+        while len(merged) < self.settings.vibe_results:
+            advanced = False
+            for hits in result_lists:
+                if position < len(hits):
+                    advanced = True
+                    hit = hits[position]
+                    if hit.video_id not in seen:
+                        seen.add(hit.video_id)
+                        merged.append(hit)
+                        if len(merged) >= self.settings.vibe_results:
+                            break
+            if not advanced:
+                break
+            position += 1
+        return merged
+
+    def render_vibe_results(self, interpretation: str, hits: list[SearchHit]) -> str:
+        lines = [f'<b>◆ Подборка по вайбу</b>\n<i>{html_escape(interpretation)}</i>', '']
+        for index, hit in enumerate(hits, start=1):
+            meta_parts = []
+            if hit.uploader:
+                meta_parts.append(hit.uploader)
+            duration = human_duration(hit.duration_seconds)
+            if duration:
+                meta_parts.append(duration)
+            lines.append(f'<b>{index}.</b> {html_escape(hit.title)}')
+            if meta_parts:
+                lines.append(f'   <i>{html_escape(" · ".join(meta_parts))}</i>')
+        lines.append('')
+        lines.append('Нажми номер трека, чтобы скачать.')
+        return '\n'.join(lines)
+
     async def handle_media(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         del ctx
         message = update.message
@@ -774,6 +870,14 @@ class BotApp:
         if data == 'menu:search':
             await message.reply_text(
                 'Используй <code>/search название</code> для поиска по истории и избранному.',
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        if data == 'menu:vibe':
+            await message.reply_text(
+                'Опиши настроение или занятие — соберу подборку.\n'
+                '<code>/vibe дождливая ночь, инструментал, ~90 BPM</code>\n'
+                'Пустой <code>/vibe</code> подберёт под твою историю прослушиваний.',
                 parse_mode=ParseMode.HTML,
             )
             return
@@ -992,6 +1096,7 @@ def main() -> None:
     application.add_handler(CommandHandler('queue', bot_app.cmd_queue))
     application.add_handler(CommandHandler('cancel', bot_app.cmd_cancel))
     application.add_handler(CommandHandler('search', bot_app.cmd_search))
+    application.add_handler(CommandHandler('vibe', bot_app.cmd_vibe))
     application.add_handler(CommandHandler('admin', bot_app.cmd_admin))
     application.add_handler(CallbackQueryHandler(bot_app.handle_callback))
     application.add_handler(InlineQueryHandler(bot_app.handle_inline))

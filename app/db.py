@@ -128,6 +128,7 @@ class Database:
                 'favorites_added',
                 'search_requests',
                 'inline_requests',
+                'vibe_requests',
             ):
                 conn.execute('INSERT OR IGNORE INTO stats(key, value) VALUES(?, 0)', (key,))
 
@@ -405,6 +406,43 @@ class Database:
                 "WHERE created_at <= datetime('now', ?)",
                 (f'-{max(0, max_age_seconds)} seconds',),
             )
+
+    def get_taste_profile(self, user_id: int, limit: int) -> list[str]:
+        """Recent distinct track titles the user downloaded or favorited.
+
+        Used to personalize vibe interpretation. Favorites are weighted first
+        (an explicit taste signal), then recent successful downloads.
+        """
+        titles: list[str] = []
+        seen: set[str] = set()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT title FROM favorites
+                WHERE user_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (user_id, limit),
+            ).fetchall()
+            rows += conn.execute(
+                """
+                SELECT title FROM history
+                WHERE user_id = ? AND status = 'done'
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (user_id, limit * 3),
+            ).fetchall()
+        for row in rows:
+            title = (row['title'] or '').strip()
+            key = title.lower()
+            if title and key not in seen:
+                seen.add(key)
+                titles.append(title)
+            if len(titles) >= limit:
+                break
+        return titles
 
     def get_global_summary(self) -> dict[str, int]:
         with self.connect() as conn:

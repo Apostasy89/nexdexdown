@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.0 - 2026-06-24
+
+- added AI vibe search: `/vibe <description>` turns a free-form mood/activity into several concrete search queries, aggregates and de-duplicates the results into one curated set
+- vibe interpretation uses Claude via the official `anthropic` SDK (`AI_MODEL`, default `claude-haiku-4-5`) with structured JSON output; falls back to a deterministic mood→genre lexicon when `ANTHROPIC_API_KEY` is unset
+- personalizes the set from the user's listening history and favorites (`get_taste_profile`)
+- empty `/vibe` builds a taste-only set; added a "Подбор по вайбу" menu button
+- added `ANTHROPIC_API_KEY`, `AI_MODEL`, `VIBE_QUERIES`, `VIBE_RESULTS` settings and a `vibe_requests` stat
+- added unit tests for the lexicon fallback, query de-dup/cap, the round-robin aggregator, and the taste profile
+
 ## 1.2.0 - 2026-06-24
 
 - added search by track name: plain text is treated as a `yt-dlp` `ytsearch` query with numbered, selectable results

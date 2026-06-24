@@ -14,6 +14,7 @@ NexDownSave is a production-oriented Telegram bot for track links, public music 
 
 - Russian-first branded Telegram UX
 - **search by track name** — type a query, pick a numbered result, get MP3
+- **vibe search** — `/vibe rainy night, instrumental, ~90 BPM` → an AI-curated set, personalized from your history (Claude + lexicon fallback)
 - **inline mode** — `@bot track name` works in any chat
 - **instant re-send from cache** — already processed tracks return immediately via Telegram `file_id`
 - safe HTML-formatted bot responses without Markdown escaping bugs
@@ -90,6 +91,10 @@ Main variables:
 - `QUEUE_MAXSIZE`
 - `SEARCH_TIMEOUT`
 - `SEARCH_RESULTS`
+- `ANTHROPIC_API_KEY` (optional — enables AI vibe search)
+- `AI_MODEL` (default `claude-haiku-4-5`)
+- `VIBE_QUERIES`
+- `VIBE_RESULTS`
 
 ## Local management
 
@@ -213,6 +218,7 @@ Optional cron example:
 - `/history`
 - `/favorites`
 - `/search <text>`
+- `/vibe <description>`
 - `/status`
 - `/admin`
 
@@ -228,6 +234,20 @@ Optional cron example:
   is enabled.
 - **Cache:** the first successful download of a track stores its Telegram `file_id` in the
   `tracks` table, so repeats and inline hits are instant and skip re-downloading.
+
+## Vibe search (AI)
+
+- **Command:** `/vibe <description>` — e.g. `/vibe дождливая ночь, инструментал, ~90 BPM`.
+  An empty `/vibe` builds a set purely from the user's listening history.
+- **How it works:** a free-form mood/activity description is turned into several concrete
+  search queries (semantic interpretation), each is run through the `yt-dlp` search, and the
+  results are de-duplicated into one curated set. The user's recent downloads and favorites
+  bias the result toward their taste.
+- **AI tier:** with `ANTHROPIC_API_KEY` set, interpretation uses Claude
+  (`AI_MODEL`, default `claude-haiku-4-5`, ~$0.005/request) via the official `anthropic` SDK
+  with structured JSON output. **Without a key it degrades gracefully** to a built-in
+  deterministic mood→genre lexicon — the feature always works, the AI just makes it sharper.
+- **Config:** `VIBE_QUERIES` (queries per request), `VIBE_RESULTS` (tracks in the set).
 
 ## Scope
 
